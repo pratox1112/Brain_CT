@@ -1,97 +1,159 @@
-# 🧠 Brain CT Hemorrhage Classification and Segmentation
+# Brain CT Image Hemorrhage Classification & Segmentation
 
-This repository contains the code and methodology for a multi-task deep learning model that performs **simultaneous classification and segmentation** of brain hemorrhages from CT images. The model was trained on clinical data provided by Zeta Surgical and leverages convolutional neural networks (CNNs) to identify various hemorrhage types and segment lesion areas.
+**Date:** April 20, 2025
+**Authors:** Pratosh Karthikeyan and Nirmal
 
-## 🚀 Project Overview
+## Abstract
 
-- **Framework:** PyTorch  
-- **Tasks:** Multi-label classification and binary segmentation  
-- **CT Views Used:** Brain Bone Window  
-- **Model Type:** Shared encoder with classification and segmentation heads  
-- **Dataset:** Annotated CT scans with classification labels and polygonal segmentation masks  
+This project constructed classification and segmentation models for brain CT images based on CNN (Convolutional Neural Network) and U-Net architecture. Six classes are involved based on different categories of hemorrhage in patient's brain, whereas the segmentation aims to provide the exact location of the hemorrhage for a given brain CT image.
 
-> 📌 Note: The `'multi'` class label was excluded from active learning in some stages of the pipeline.
+### Methodology
+- Cropped 3D data of brain CT scan to fit ventricular region compactly
+- Used 3D U-net as semantic segmentation with weighted binary crossentropy loss
 
----
+### Results
+- **Classification Accuracy:** 68% (testing set)
+- **Segmentation Accuracy:** 92% (testing set)
 
-## 📂 Dataset
+## Clinical Importance
 
-- 6 hemorrhage classes: `epidural`, `subdural`, `intraparenchymal`, `subarachnoid`, `intraventricular`, `multi-type`
-- Polygon-based segmentation masks available for a subset of the dataset
-- A total of 5000 images were randomly sampled and split into 80% training and 20% validation sets
+Brain surgery requires doctors to precisely locate the treatment part, since a tiny error may cause serious results. Mathematical models can make better judgments for treatment.
 
----
+### Tasks Addressed
+1. Decide if there is hemorrhage in patient's brain
+2. Determine which types of hemorrhage exist  
+3. Locate exact position of hemorrhage
 
-## 🧠 Model Architecture
+## Dataset
 
-The model consists of a shared convolutional encoder and two heads: one for classification and one for segmentation.
+### Source
+**Provider:** Zeta Surgical
 
-### Shared Encoder
-- 3 convolutional layers with filter sizes 16, 32, and 64
-- Each layer includes ReLU activation and max pooling
-- Dropout (0.1) is applied after the first two convolutional layers for regularization
+**Company Mission:** Democratize access to accurate, safe, and fast image guidance, to unlock the use of image guidance directly at the point of care, and to enable new treatments in cases such as emergencies and bedside procedures.
 
-### Classification Head
-- The encoder output is flattened and passed through a fully connected layer with 128 units
-- Dropout (0.3) is applied before the final output layer
-- The final layer contains 5 output units with sigmoid activation for multi-label classification
+### Specifications
+- **Total Instances:** 752,803
+- **Image Size:** 512 × 512 pixels
+- **Channels:** 3 (RGB)
 
-### Segmentation Head
-- The encoder output is passed through three transposed convolution layers to upsample it
-- A final sigmoid activation produces a pixel-wise binary segmentation mask
+### Categories
+| Category | Instances |
+|----------|-----------|
+| Epidural | 1,694 |
+| Intraparenchymal | 15,664 |
+| Intraventricular | 9,878 |
+| Subarachnoid | 16,423 |
+| Subdural | 32,200 |
+| Multiple Hemorrhage | 32,074 |
 
----
+### Preprocessing Steps
+1. **Convert RGB to Grayscale:** Using formula `Xij = (Rij + Gij + Bij) / 3`
+2. **Resize Images:** From 512×512 to 128×128 pixels
+3. **Dataset Selection:** Random selection of 1,000 images per category for training
 
-## 🏋️‍♂️ Training and Optimization
+## Models
 
-The model is trained using a multi-task learning approach with two separate loss objectives: one for classification and another for segmentation.
+## Classification Model
 
-### Optimization Setup
-- **Loss Function:** Binary Cross Entropy (BCE) for both tasks
+### Architecture: CNN
+- **Layers:** 
+  - 3 convolution layers with ReLU and Max Pooling
+  - 1 convolution layer with flattening layer
+  - 2 fully-connected hidden layers
+- **Parameters:** 1.2 million
+
+### Dataset Split
+- **Training Instances:** 4,800 (80%)
+- **Testing Instances:** 1,200 (20%)
+
+### Challenges
+- Significant overfitting (90% training vs 50% validation accuracy)
+- Unstable results due to random initialization dependency
+
+### Solutions Attempted
+- Added Dropout layers
+- Increased dataset to 1,600 images per type
+- Tuned learning rate and architecture size
+- Changed dropout parameters
+
+### Results
+- **Final Testing Accuracy:** 68%
+- **Final Training Accuracy:** 75%
+- **Optimal Epochs:** 25
+- **Maximum Validation Accuracy:** 70%
+
+## Segmentation Model
+
+### Architecture: 3D U-Net
+
+### Dataset
+- **Source:** Reference [4] - 3D MRI images
+- **Total Images:** 87
+- **Original Dimensions:** (176, 208, 176)
+- **Cropped Dimensions:** (80, 120, 120)
+- **Focus Area:** Ventricular region
+
+### Architecture Details
+- **Input Size:** 512 × 512
+- **Structure:**
+  - Contraction path (gray) - usual CNN process
+  - Expansion path (black) - upsampling back to original size
+- **Layers:**
+  - Conv3D layers with 3×3×3 filters
+  - 3D max-pooling with 2×2×2 cube
+  - Concatenation of contracting and expanding paths
+
+### Training Configuration
+- **Parameters:** 1.2 million
 - **Optimizer:** Adam
-- **Learning Rate:** 0.0001
-- **Epochs:** 20
-- **Batch Size:** 16
-- **Hardware:** Trained on CPU
+- **Learning Rate:** 2e-4
+- **Loss Function:** Weighted binary crossentropy
+- **Loss Weights:** [0.2, 0.8] (background, mask)
+- **Metrics:** Accuracy
 
-### Training Process
-- In each epoch, the model performs forward passes on training data and computes losses for both classification and segmentation outputs
-- The total loss is the sum of classification and segmentation loss
-- Gradients are computed and used to update model weights using backpropagation
-- Validation is run after each epoch using the same loss metrics but without gradient updates
-- Training and validation loss values are tracked and plotted to monitor convergence
+### Results
+- **Testing Accuracy:** 92%
+- **Training Accuracy:** 98%
 
----
+## Performance Analysis
 
-## 📈 Results
+### Classification
+**Challenges:**
+- Much more difficult task compared to segmentation
+- Required extensive trial and error
+- Low and unstable accuracy results
 
-- **Classification Accuracy:** 96.10%  
-- **Segmentation IoU:** 1.0  
-- The training and validation loss curves show rapid convergence and consistent generalization
+### Segmentation
+**Advantages:**
+- More stable training process
+- Good accuracy achieved
 
----
+**Limitations:**
+- Not good F1 score due to high class imbalance
 
-## 🔬 Discussion
+## Future Work
 
-- The shared encoder allows for efficient learning of features common to both tasks
-- Dropout layers helped improve generalization, especially given the limited dataset size
-- High IoU in segmentation suggests strong spatial accuracy, though limited mask data may have contributed
-- Using only a single CT view (brain bone window) proved sufficient for both classification and segmentation
+### Proposed Improvements
+- Use different weights for weighted binary crossentropy loss
+- Analyze effect on confusion matrix
+- Perform data augmentation to increase dataset size
+- Fine-tune hyperparameters
+- Use bigger architecture (current: 1.4M parameters)
 
----
+## Acknowledgments
 
-## 🔮 Future Work
+We hereby especially thank **Professor He Wang** for providing the opportunity for us to work on this project and to visit the company. We are also grateful for **Zeta Surgical**, for giving us such an opportunity to work on live industrial project by generously offering us its first-hand dataset.
 
-- Extend model to use multiple CT window types (e.g., brain, subdural, max contrast)
-- Explore more advanced architectures like UNet or attention-based decoders
-- Apply data augmentation to simulate real-world variability in CT imaging
-- Train on GPU for deeper, more expressive models
-- Validate performance in real clinical settings with expert annotations
+**Special Thanks:**
+- **Raahil Sha** (Co-Founder and CTO at Zeta Surgical) and his team
+- Zeta Surgical team for providing first-hand dataset
+- Company visit opportunity and access to high-power computers
 
----
+## References
 
-
-## 🧾 Citation
-
-**Pratosh Karthikeyan & Nirmalkumar Thirupallikrishnan Kesavan**  
-*College of Engineering, Northeastern University, 2025*
+1. Intracerebral Haemorrhage Segmentation in Non-Contrast CT
+2. Automatic Segmentation of Intracerebral Hemorrhage from Brain CT Images  
+3. Segmentation and quantification of intra-ventricular/cerebral hemorrhage in CT scans
+4. Segmentation part from MATH7243-2020 course
+5. Performance evaluation of 2D and 3D segmentation approaches on CT images
+6. MRI-Image-Segmentation
