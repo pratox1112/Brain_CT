@@ -72,3 +72,65 @@ Every measured number in this project lives here. Format per entry: date, commit
   - **Intercepts 0 and 1 (5,386 images) are unusual for CT.** They are candidates for the known RSNA pixel-value quirk. Verify against pixel histograms in Phase 2 before correcting anything.
   - **269 images are not 512×512.** Preprocessing resizes everything to 256×256, so this is handled, but aspect ratios differ for non-square ones (decide in Phase 2: plain resize or pad first).
   - No corrupt headers. Pixel-data corruption, if any, would show up in the Phase 2 cache build.
+
+### Phase 1 – Label table and patient-level split (80/10/10)
+- Date: 2026-10-15
+- Commit: n/a (code not yet committed on the cluster; written 2026-10-15)  Run ID: Slurm job on node c0604 (log `/scratch/karthikeyan.pr/brainct/logs/make_split_<job>.log`)
+- Hardware: Explorer `short` partition, node c0604, 4 CPUs, 16 GB
+- Software: Python 3.11.17, pandas (cluster venv)
+- Command: `sbatch ~/Brain_CT/jobs/make_split.sh` → `python -m brainct.data.split` (seed 2026, val 0.1, test 0.1)
+- Elapsed: 34 s
+- **Overlap check: passed.** Zero patients, studies or series shared between splits.
+
+**Label table**
+
+| Metric | Value |
+|---|---|
+| Label rows (excluding header) | 4,516,842 |
+| Exact duplicate rows removed | 24 (4,516,818 = 752,803 × 6 after removal) |
+| Conflicting duplicates | 0 |
+| Images with all 6 labels | 752,803 |
+| Images whose `any` disagrees with the subtypes | 0 |
+| Label/header mismatches | 0 |
+
+**Strata** (each patient's rarest subtype; rarity order by patient count: epidural < intraventricular < subdural < subarachnoid < intraparenchymal)
+
+| none | intraventricular | subdural | intraparenchymal | subarachnoid | epidural |
+|---|---|---|---|---|---|
+| 11,286 | 3,226 | 2,272 | 993 | 851 | 310 |
+
+**Split**
+
+| | Train | Val | Test | Total |
+|---|---|---|---|---|
+| Patients | 15,150 (79.998%) | 1,894 (10.001%) | 1,894 (10.001%) | 18,938 |
+| Studies | 17,346 | 2,188 | 2,210 | 21,744 |
+| Images | 600,390 (79.75%) | 75,840 (10.07%) | 76,573 (10.17%) | 752,803 |
+
+**Image-level positive rate**
+
+| Label | Train | Val | Test | Total |
+|---|---|---|---|---|
+| any | 14.29% | 14.33% | 14.68% | 14.34% |
+| epidural | 0.417% | 0.450% | 0.396% | 0.418% |
+| intraparenchymal | 4.81% | 4.62% | 4.85% | 4.80% |
+| intraventricular | 3.51% | 3.33% | 3.39% | 3.48% |
+| subarachnoid | 4.67% | 5.25% | 4.79% | 4.74% |
+| subdural | 6.21% | 6.31% | 6.63% | 6.27% |
+
+**Positive images / positive patients**
+
+| Label | Train | Val | Test |
+|---|---|---|---|
+| any | 85,821 / 6,122 | 10,868 / 765 | 11,244 / 765 |
+| epidural | 2,501 / 248 | 341 / 31 | 303 / 31 |
+| intraparenchymal | 28,902 / 3,736 | 3,505 / 458 | 3,711 / 480 |
+| intraventricular | 21,086 / 2,636 | 2,526 / 334 | 2,593 / 333 |
+| subarachnoid | 28,029 / 2,725 | 3,978 / 355 | 3,668 / 371 |
+| subdural | 37,302 / 2,674 | 4,784 / 348 | 5,080 / 352 |
+
+- Notes:
+  - Rates in the summary tables are rounded from the report's 5-decimal values.
+  - Patient fractions are exact by construction. Image fractions drift slightly because patients have different numbers of slices.
+  - **Epidural is thin in val and test: 31 patients each** (341 and 303 images). Its per-subtype AUC will have the widest uncertainty. Report it with a confidence interval (bootstrap over patients) in Phase 3.
+  - Outputs (cluster, not in git): `~/brainct_outputs/splits/{labels.parquet, split_images.parquet, split_patients.csv, split_report.json}`.
