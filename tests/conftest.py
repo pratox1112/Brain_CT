@@ -32,8 +32,17 @@ def make_dicom_bytes(
     z: float = 0.0,
     window_center: float | list[float] = 40,
     size: int = 8,
+    intercept: float = -1024,
+    pixel_representation: int = 0,
+    bits_stored: int = 12,
+    pixels: np.ndarray | None = None,
 ) -> bytes:
-    """Build a minimal RSNA-style CT DICOM (explicit VR little endian) and return its bytes."""
+    """Build a minimal RSNA-style CT DICOM (explicit VR little endian) and return its bytes.
+
+    `pixels` are the stored values (before rescale); default is all zeros of shape (size, size).
+    """
+    dtype = np.int16 if pixel_representation == 1 else np.uint16
+    pixels = np.zeros((size, size), dtype=dtype) if pixels is None else pixels.astype(dtype)
     meta = FileMetaDataset()
     meta.MediaStorageSOPClassUID = CTImageStorage
     meta.MediaStorageSOPInstanceUID = image_id
@@ -52,18 +61,17 @@ def make_dicom_bytes(
     ds.PixelSpacing = [0.488281, 0.488281]
     ds.SliceThickness = 5
     ds.RescaleSlope = 1
-    ds.RescaleIntercept = -1024
+    ds.RescaleIntercept = intercept
     ds.WindowCenter = window_center
     ds.WindowWidth = 80
-    ds.Rows = size
-    ds.Columns = size
+    ds.Rows, ds.Columns = pixels.shape
     ds.SamplesPerPixel = 1
     ds.PhotometricInterpretation = "MONOCHROME2"
     ds.BitsAllocated = 16
-    ds.BitsStored = 12
-    ds.HighBit = 11
-    ds.PixelRepresentation = 0
-    ds.PixelData = np.zeros((size, size), dtype=np.uint16).tobytes()
+    ds.BitsStored = bits_stored
+    ds.HighBit = bits_stored - 1
+    ds.PixelRepresentation = pixel_representation
+    ds.PixelData = pixels.tobytes()
 
     buf = io.BytesIO()
     ds.save_as(buf, enforce_file_format=True)
