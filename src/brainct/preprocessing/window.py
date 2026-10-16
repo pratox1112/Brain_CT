@@ -27,7 +27,11 @@ def to_channels(hu: np.ndarray) -> np.ndarray:
     return np.stack([apply_window(hu, c, w) for c, w in WINDOWS.values()]).astype(np.float32)
 
 
+def normalize(channels: np.ndarray) -> np.ndarray:
+    """ImageNet-normalize windowed channels of shape (3, H, W)."""
+    return (channels - IMAGENET_MEAN[:, None, None]) / IMAGENET_STD[:, None, None]
+
+
 def model_input(hu: np.ndarray) -> np.ndarray:
     """The exact tensor the model sees: windowed channels, ImageNet-normalized, (3, H, W)."""
-    channels = to_channels(hu)
-    return (channels - IMAGENET_MEAN[:, None, None]) / IMAGENET_STD[:, None, None]
+    return normalize(to_channels(hu))

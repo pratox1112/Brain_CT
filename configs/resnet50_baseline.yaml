@@ -1,0 +1,45 @@
+# Phase 3 baseline: ImageNet-pretrained ResNet-50, 6 sigmoid outputs (any + 5 subtypes).
+# Paths may use $USER and ~; they are expanded when the config is loaded.
+# Any value can be overridden on the command line: --set key=value
+
+run_id: resnet50_baseline
+runs_dir: /scratch/$USER/brainct/runs
+cache_dir: /scratch/$USER/brainct/preprocessed
+labels_path: ~/brainct_outputs/splits/labels.parquet
+device: cuda
+seed: 2026
+
+# Model and optimisation
+pretrained: true
+epochs: 5
+batch_size: 64
+lr: 0.0003
+weight_decay: 0.0001
+warmup_steps: 1000
+class_weights: [2.0, 1.0, 1.0, 1.0, 1.0, 1.0]  # any, epidural, intraparenchymal, intraventricular, subarachnoid, subdural
+amp: true            # bf16 autocast on the A100
+channels_last: true
+
+# Augmentation (train only)
+augment: true
+hflip_p: 0.5
+rotate_degrees: 10.0
+scale_min: 0.9
+scale_max: 1.1
+translate: 0.05
+
+# Data loading
+num_workers: 12
+val_batch_size: 256
+
+# Run control
+validate: true
+max_steps: null
+log_every: 50
+ckpt_every: 2000
+time_budget_hours: 7.5   # checkpoint and exit before the 8 h gpu-partition limit
+
+# Weights & Biases
+wandb_mode: online
+wandb_project: brainct
+wandb_entity: pratosh2002-projects
