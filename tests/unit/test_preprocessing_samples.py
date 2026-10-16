@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from brainct.data.check_cache import compare
 from brainct.preprocessing.dicom import IMAGE_SIZE, preprocess_dicom
 from brainct.preprocessing.hu import HU_MAX, HU_MIN
 from brainct.preprocessing.window import model_input
@@ -34,6 +35,8 @@ def _edge_reasons() -> dict[str, str]:
 
 FILES = _sample_files()
 EDGE_REASONS = _edge_reasons()
+# Written on the cluster by `check_cache verify`, copied to the laptop.
+EXPECTED = REPO_ROOT / "samples" / "expected_hu256.npz"
 
 pytestmark = pytest.mark.skipif(not FILES, reason="no local RSNA sample DICOMs")
 
@@ -53,6 +56,15 @@ def test_real_dicom_preprocesses_to_plausible_ct(path):
     x = model_input(image)
     assert x.shape == (3, IMAGE_SIZE, IMAGE_SIZE)
     assert np.isfinite(x).all()
+
+
+@pytest.mark.skipif(not EXPECTED.exists(), reason="no samples/expected_hu256.npz from cluster")
+def test_laptop_matches_cluster_preprocessing():
+    """Training (cluster) and serving (laptop/Docker) must produce bit-identical HU images."""
+    result = compare(EXPECTED, [d / "dicom" for d in SAMPLE_DIRS])
+
+    assert result["missing_locally"] == 0
+    assert result["mismatched"] == 0, result["mismatched_examples"]
 
 
 @pytest.mark.skipif(not EDGE_REASONS, reason="no samples_edge/samples_edge.csv")

@@ -227,3 +227,57 @@ Pixel format × rescale intercept (image counts):
   - The sign fix ran on 100% of the broken groups and 0% of the others.
   - Normal groups are unchanged, except that clipping removed the -3024 field-of-view padding in the signed16 groups (now floored at -1024).
 - Laptop: 360 tests pass (`uv run pytest`), including all 305 real sample and edge DICOMs (shape, HU range, air present) and the edge-branch test (the sign fix runs only on the broken edge images).
+
+### Phase 2 – Cache build, test run (first 5,000 images)
+- Date: 2026-10-16
+- Run ID: Slurm job on node d0149, `OUT=/scratch/karthikeyan.pr/brainct/preprocessed_test`, `--limit 5000`
+- Hardware: Explorer `short`, 32 CPUs, 64 GB
+- Command: `sbatch --export=ALL,OUT=.../preprocessed_test ~/Brain_CT/jobs/build_cache.sh --limit 5000`
+- Result:
+  - 5,000 / 5,000 ok, 0 failed. Sign-fixed 2, padded 0, not 512×512: 1 (square, so no padding).
+  - By split: train 3,972 · val 510 · test 518.
+  - `hu256.npy` 655,360,128 bytes = 5,000 × 256 × 256 × 2 + 128-byte .npy header.
+  - Elapsed 20.4 s in-script (8 s setup), 26 s job. Reported rate 249 img/s.
+- Notes: with only 5 chunks of 1,000 images, at most 5 of the 32 workers had work, so 249 img/s understates the full-run throughput. It's not a usable estimate of the full build's speed.
+
+### Phase 2 – Cache build, full run (all 752,803 training images)
+- Date: 2026-10-16
+- Run ID: Slurm job 11144059 on node d0142
+- Hardware: Explorer `short`, 32 CPUs, 64 GB (sstat MaxRSS showed about 96 GB mid-run, very likely shared memmap pages counted once per worker; no OOM)
+- Software: Python 3.11.17, NumPy 2.4.6, Pillow 12.3.0, pydicom 3.0.2
+- Command: `sbatch ~/Brain_CT/jobs/build_cache.sh` → `python -m brainct.data.build_cache --workers 32` (size 256, chunk size 1,000)
+- Result:
+
+| Metric | Value |
+|---|---|
+| Images / ok / **failed** | 752,803 / 752,802 / **1** |
+| Sign-fixed (unsigned 12-bit, intercept 0/1) | **123**, exactly as predicted from the headers (73 + 50) |
+| Not 512×512 / padded (non-square) | 269 / 142 |
+| OK by split | train 600,389 · val 75,840 · test 76,573 (the one failure is in train) |
+| Cache file | `hu256.npy`, 98,671,394,944 bytes (92 GiB), int16 [752803, 256, 256] |
+| Chunks | 753, 0 resumed |
+| Elapsed | **2,049.7 s (34 min)** in-script, 2,072 s job |
+| Throughput | 371 img/s overall (log); 312–432 img/s across progress intervals |
+
+- Notes:
+  - The one failed image is recorded in `~/brainct_outputs/preprocessed/cache_failures.csv`. Its row holds air (-1024) and `ok=False`, so **training must drop `ok=False` rows**.
+  - Its header parsed fine in Phase 1, so the corruption is in the pixel data.
+  - **The failed image is `ID_6431af929`** (cache row 295,413, train split). **Its pixel data is truncated: 153,710 of the expected 524,288 bytes** (512 × 512 × 2). This file is commonly reported as corrupt in the RSNA dataset. It's excluded from training via `ok=False`.
+
+### Phase 2 – Cache equivalence check (cluster)
+- Date: 2026-10-16
+- Run ID: Slurm job on node c0603 (`jobs/check_cache.sh` → `python -m brainct.data.check_cache verify`, seed 2026). Elapsed 47 s.
+- Software: Python 3.11.17, NumPy 2.4.6, Pillow 12.3.0, pydicom 3.0.2
+- Result:
+  - **1,000 random cache rows vs fresh `preprocess_dicom` of the zip bytes: 0 mismatches (exact equality).**
+  - **All 305 laptop sample and edge DICOMs are in the cache, and all 305 cache rows equal fresh preprocessing of the sample files: 0 mismatches.**
+  - Expected outputs written to `~/brainct_outputs/samples/expected_hu256.npz`, for the laptop comparison.
+
+### Phase 2 – Cross-machine equivalence (laptop vs cluster)
+- Date: 2026-10-16
+- Hardware: laptop (Windows 11, Intel Core Ultra 7 155U) vs cluster (Linux, Explorer)
+- Software (identical on both): Python 3.11.17, NumPy 2.4.6, Pillow 12.3.0, pydicom 3.0.2
+- Command (laptop): `uv run python -m brainct.data.check_cache compare --expected samples/expected_hu256.npz --sample-dir samples/dicom --sample-dir samples_edge/dicom`
+- Result: **305 / 305 sample and edge DICOMs compared, 0 missing, 0 mismatched.** The laptop's `preprocess_dicom` output is bit-identical to the cluster's, and so to the training cache.
+- `uv run pytest` on the laptop: **367 passed** (9.92 s), including `test_laptop_matches_cluster_preprocessing`.
+- **Phase 2 acceptance criteria met:** unit tests pass; the cache holds every image (752,802 ok plus 1 documented corrupt file); the cache matches fresh preprocessing (1,000 random rows plus 305 samples); and training and serving preprocessing are identical across machines.
