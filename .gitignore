@@ -1,6 +1,6 @@
-
-data_1/
-data/
+# Data (leading "/" = only the top-level folder, not src/brainct/data/)
+/data/
+/data_1/
 
 # Python / tooling
 .venv/
@@ -11,5 +11,5 @@ __pycache__/
 .ruff_cache/
 
 # Local-only artifacts (weights, models, RSNA samples)
-artifacts/
-samples/
+/artifacts/
+/samples/

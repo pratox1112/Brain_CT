@@ -134,3 +134,16 @@ Every measured number in this project lives here. Format per entry: date, commit
   - Patient fractions are exact by construction. Image fractions drift slightly because patients have different numbers of slices.
   - **Epidural is thin in val and test: 31 patients each** (341 and 303 images). Its per-subtype AUC will have the widest uncertainty. Report it with a confidence interval (bootstrap over patients) in Phase 3.
   - Outputs (cluster, not in git): `~/brainct_outputs/splits/{labels.parquet, split_images.parquet, split_patients.csv, split_report.json}`.
+
+### Phase 1 – Test-split sample DICOMs for the laptop
+- Date: 2026-10-15
+- Commit: n/a (code not yet committed on the cluster; written 2026-10-15)  Run ID: Slurm job on node c0219
+- Hardware: Explorer `short` partition, node c0219, 2 CPUs, 8 GB
+- Command: `sbatch ~/Brain_CT/jobs/extract_samples.sh` → `python -m brainct.data.samples` (seed 2026; 60 normal, 40 per subtype, 5 per edge case)
+- Elapsed: 32 s
+- Result:
+  - **280 images from 231 patients, all from the test split.** 146,990,556 bytes (≈147 MB).
+  - Images per reason: normal 60 · each of the 5 subtypes 40 · intercept_0 5 · signed_12bit 5 · unsigned_12bit 5 · signed_16bit 5.
+  - Label positives among samples: any 204 · epidural 42 · intraparenchymal 87 · intraventricular 65 · subarachnoid 73 · subdural 75. Higher than 40 because images with 2+ subtypes count under each.
+  - **Not represented (zero matching test-split images): intercept_1, not_512x512, unsigned_16bit.** Whether they exist in other splits is not yet checked.
+- Location: cluster `~/brainct_outputs/samples/`, copied to laptop `C:\BrainCT\samples\` (git-ignored).
