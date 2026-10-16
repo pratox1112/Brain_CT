@@ -147,3 +147,83 @@ Every measured number in this project lives here. Format per entry: date, commit
   - Label positives among samples: any 204 · epidural 42 · intraparenchymal 87 · intraventricular 65 · subarachnoid 73 · subdural 75. Higher than 40 because images with 2+ subtypes count under each.
   - **Not represented (zero matching test-split images): intercept_1, not_512x512, unsigned_16bit.** Whether they exist in other splits is not yet checked.
 - Location: cluster `~/brainct_outputs/samples/`, copied to laptop `C:\BrainCT\samples\` (git-ignored).
+
+---
+
+## Phase 2 – Preprocessing
+
+### Phase 2 – Header edge cases by split, and pixel format vs rescale intercept
+- Date: 2026-10-16
+- Run ID: Slurm job 11142381 (`srun`, short partition, 8 GB)
+- Command: ad-hoc pandas query on `dicom_headers.parquet` joined with `split_images.parquet` (command in chat; not committed)
+- Result:
+
+| Case | Images by split | Patients |
+|---|---|---|
+| Rescale intercept = 1 | train 50 | 2 |
+| Not 512×512 | train 269 | 8 |
+| Unsigned 16-bit | none in the dataset | 0 |
+
+Pixel format × rescale intercept (image counts):
+
+| PixelRepresentation | BitsStored | -1024 | -1000 | 0 | 1 |
+|---|---|---|---|---|---|
+| 0 (unsigned) | 12 | 326,639 | 6,681 | **73** | **50** |
+| 1 (signed) | 12 | 0 | 0 | 2,312 | 0 |
+| 1 (signed) | 16 | 414,097 | 0 | 2,951 | 0 |
+
+- Notes:
+  - **Unsigned pixels with intercept 0 or 1 (123 images)** cannot produce negative HU, so air could never reach about -1000. These are the prime suspects for corrupted values. To verify with pixel histograms.
+  - **Signed pixels with intercept 0 (5,263 images)** are plausibly already stored as HU (signed values, no offset needed). To verify that their raw values span about -1000 to +1000s.
+  - Every intercept-1 and non-512×512 image is in **train**, from only 2 and 8 patients, so val and test metrics are unaffected by them.
+
+### Phase 2 – Pixel statistics per pixel-format group (evidence for the HU correction)
+- Date: 2026-10-16
+- Commit: n/a on the cluster (code on branch `building_preprocessing_function`)  Run ID: Slurm job on node d0146
+- Hardware: Explorer `short`, node d0146, 2 CPUs, 8 GB
+- Command: `sbatch ~/Brain_CT/jobs/inspect_pixels.sh` → `python -m brainct.preprocessing.inspect_pixels` (20 images per group, seed 2026, one image per patient first)
+- Elapsed: 29 s
+- Result: medians across the 20 images in each group. "stored" = raw 16-bit word; "decoded" = pydicom `pixel_array`; HU = decoded × slope + intercept.
+
+| Statistic | unsigned12 -1024 | unsigned12 -1000 | **unsigned12 0** | **unsigned12 1** | signed12 0 | signed16 -1024 | signed16 0 |
+|---|---|---|---|---|---|---|---|
+| stored p50 | 115.5 | 28 | **3097** | **3097** | 64536 | 829.5 | 62512 |
+| stored max | 2569 | 2543 | **4095** | **4095** | 65535 | 63536 | 65535 |
+| HU min | -1022.5 | -1000 | **0** | **1** | -1000 | -3024 | -3024 |
+| HU p50 | -908.5 | -972 | **3097** | **3098** | -992 | -975.5 | -957 |
+| HU p99 | 1026 | 1087.5 | **4079** | **4068** | 1141.5 | 1372.5 | 1219 |
+| HU max | 1545 | 1543 | **4095** | **4096** | 1526 | 1821.5 | 1758 |
+| frac air (< -900) | 0.504 | 0.606 | **0.000** | **0.000** | 0.605 | 0.590 | 0.545 |
+| frac brain (0–80) | 0.243 | 0.169 | 0.164 | 0.132 | 0.188 | 0.190 | 0.172 |
+| frac bone (> 300) | 0.075 | 0.058 | **0.812** | **0.849** | 0.050 | 0.067 | 0.064 |
+| frac below -1100 | 0 | 0 | 0 | 0 | 0 | 0.213 | 0.226 |
+| frac above 3000 | 0 | 0 | **0.754** | **0.811** | 0 | 0 | 0 |
+
+- Findings:
+  - **unsigned12 with intercept 0/1 is broken:** there is no air at all, and about 80% of pixels read as above 3000 HU. The median stored value of 3097 ≈ 4096 − 999, which is exactly how **-999 HU (air) looks in 12-bit two's complement**. These pixels are *signed* 12-bit values mislabelled as unsigned. Fix: treat values ≥ 2048 as negative (subtract 4096), then apply slope and intercept. Brain-range fractions (0.13–0.16) already match the normal groups, because small positive values are unaffected by the mislabel.
+  - **signed12 with intercept 0 is fine:** the stored values already are HU (air -1000, about 60% air).
+  - **signed16 groups:** HU min -3024 with about 21–23% of pixels below -1100. That's padding outside the scanner's circular field of view (a fixed fill value), not corruption. All three windows' lower bounds are above -1000 HU, so the padding maps to 0 either way.
+  - Unsigned 16-bit doesn't occur.
+- Edge samples (same job): **25 train-split DICOMs**, 5 per case with no overlap: not_512x512, intercept_1, unsigned12_intercept_0, signed12_intercept_0, signed16_intercept_0. Cluster `~/brainct_outputs/samples_edge/`; for preprocessing tests only, never for evaluation.
+
+### Phase 2 – Verification of the 12-bit sign fix (same 20 images per group, before vs after)
+- Date: 2026-10-16
+- Run ID: Slurm job on node c0668 (`jobs/inspect_pixels.sh`, same seed so the same images as the first run). Elapsed 27 s.
+- "fixed" = HU from the preprocessing code (`brainct.preprocessing.dicom.dicom_to_hu`: sign fix + clip to [-1024, 3071]).
+
+| Statistic | unsigned12 -1024 | unsigned12 -1000 | **unsigned12 0** | **unsigned12 1** | signed12 0 | signed16 -1024 | signed16 0 |
+|---|---|---|---|---|---|---|---|
+| sign_fixed_frac | 0 | 0 | **1.0** | **1.0** | 0 | 0 | 0 |
+| frac air, before → after | 0.504 → 0.504 | 0.606 → 0.606 | **0.000 → 0.527** | **0.000 → 0.688** | 0.605 → 0.605 | 0.590 → 0.590 | 0.545 → 0.545 |
+| frac bone, before → after | 0.075 → 0.075 | 0.058 → 0.058 | **0.812 → 0.062** | **0.849 → 0.050** | 0.050 → 0.050 | 0.067 → 0.067 | 0.064 → 0.064 |
+| frac > 3000 HU, before → after | 0 → 0 | 0 → 0 | **0.754 → 0** | **0.811 → 0** | 0 → 0 | 0 → 0 | 0 → 0 |
+| frac < -1100 HU, before → after | 0 → 0 | 0 → 0 | 0 → 0 | 0 → 0 | 0 → 0 | 0.213 → 0 | 0.226 → 0 |
+| HU p50, before → after | -908.5 → -908.5 | -972 → -972 | **3097 → -925.5** | **3098 → -967.5** | -992 → -992 | -975.5 → -975.5 | -957 → -957 |
+| HU min, after | -1022.5 | -1000 | -1000 | -999 | -1000 | -1024 | -1024 |
+| HU max, after | 1545 | 1543 | 1769.5 | 1575.5 | 1526 | 1821.5 | 1758 |
+
+- **Conclusion: the fix works and is targeted.**
+  - The two broken groups now have air, brain and bone fractions in the same range as the normal groups.
+  - The sign fix ran on 100% of the broken groups and 0% of the others.
+  - Normal groups are unchanged, except that clipping removed the -3024 field-of-view padding in the signed16 groups (now floored at -1024).
+- Laptop: 360 tests pass (`uv run pytest`), including all 305 real sample and edge DICOMs (shape, HU range, air present) and the edge-branch test (the sign fix runs only on the broken edge images).

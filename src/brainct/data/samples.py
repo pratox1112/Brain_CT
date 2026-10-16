@@ -55,7 +55,7 @@ EDGE_CASES: dict[str, Callable[[pd.DataFrame], pd.Series]] = {
 }
 
 
-def _pick(pool: pd.DataFrame, n: int, rng: np.random.Generator) -> pd.DataFrame:
+def pick_spread(pool: pd.DataFrame, n: int, rng: np.random.Generator) -> pd.DataFrame:
     """Pick up to n rows at random, one image per patient first, then top up if needed."""
     shuffled = pool.iloc[rng.permutation(len(pool))]
     one_per_patient = shuffled.drop_duplicates("patient_id")
@@ -83,7 +83,7 @@ def select_samples(
 
     reasons: dict[str, list[str]] = {}
     for name, mask, n in categories:
-        for image_id in _pick(pool[mask], n, rng).index:
+        for image_id in pick_spread(pool[mask], n, rng).index:
             reasons.setdefault(image_id, []).append(name)
 
     selected = pool.loc[sorted(reasons)].reset_index()
