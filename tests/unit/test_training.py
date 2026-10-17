@@ -13,6 +13,7 @@ import torch
 from brainct.data.build_cache import CACHE_FILE, INDEX_FILE
 from brainct.data.labels import LABELS, SUBTYPES
 from brainct.preprocessing.window import model_input
+from brainct.training import bench_loader
 from brainct.training.config import TrainConfig, load_config
 from brainct.training.dataset import Augment, CacheDataset, EpochSampler
 from brainct.training.evaluate import TestAlreadyEvaluatedError, evaluate
@@ -115,6 +116,46 @@ def test_augment_keeps_shape_and_changes_pixels(tiny_cache):
     assert x_aug.shape == x_plain.shape
     assert torch.isfinite(x_aug).all()
     assert not torch.equal(x_aug, x_plain)
+
+
+def test_dataset_hu_output_is_the_raw_cache_row(tiny_cache):
+    hu_set = CacheDataset(tiny_cache["cache_dir"], tiny_cache["labels_path"], "val", output="hu")
+    cache = np.load(tiny_cache["cache_dir"] / CACHE_FILE, mmap_mode="r")
+
+    x, _, _ = hu_set[0]
+
+    assert x.dtype == torch.int16 and x.shape == (SIZE, SIZE)
+    assert torch.equal(x, torch.from_numpy(np.array(cache[hu_set.rows[0]])))
+    with pytest.raises(ValueError, match="augmentation"):
+        CacheDataset(
+            tiny_cache["cache_dir"], tiny_cache["labels_path"], "val", Augment(), output="hu"
+        )
+    del cache
+
+
+def test_direct_and_mmap_reads_are_identical(tiny_cache):
+    args = (tiny_cache["cache_dir"], tiny_cache["labels_path"], "train")
+    direct = CacheDataset(*args, output="hu", read="direct")
+    mmap = CacheDataset(*args, output="hu", read="mmap")
+
+    for i in range(len(direct)):
+        assert torch.equal(direct[i][0], mmap[i][0])
+    with pytest.raises(ValueError, match="read must be"):
+        CacheDataset(*args, read="fast")
+
+
+def test_bench_loader_measures_every_stage(tiny_cache):
+    report = bench_loader.run(
+        tiny_cache["cache_dir"],
+        tiny_cache["labels_path"],
+        workers=[0],
+        batch_size=4,
+        batches=2,
+        warmup=1,
+    )
+
+    assert [r["stage"] for r in report["results"]] == ["read_direct", "read_mmap", "augment"]
+    assert all(r["images"] == 8 and r["images_per_s"] > 0 for r in report["results"])
 
 
 def test_epoch_sampler_resumes_in_the_same_order():

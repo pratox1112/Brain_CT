@@ -44,6 +44,7 @@ class TrainConfig:
     translate: float = 0.05
 
     # Data loading
+    cache_read: str = "direct"  # direct (one read per row) | mmap; see CacheDataset
     num_workers: int = 12
     val_batch_size: int = 256
 

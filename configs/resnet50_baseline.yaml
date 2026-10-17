@@ -29,6 +29,7 @@ scale_max: 1.1
 translate: 0.05
 
 # Data loading
+cache_read: direct   # direct = one read per cache row; mmap = numpy memmap (see bench_loader.py)
 num_workers: 12
 val_batch_size: 256
 

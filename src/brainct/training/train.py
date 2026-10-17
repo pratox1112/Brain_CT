@@ -177,8 +177,12 @@ def train(cfg: TrainConfig) -> dict[str, Any]:
         augment = Augment(
             cfg.hflip_p, cfg.rotate_degrees, cfg.scale_min, cfg.scale_max, cfg.translate
         )
-    train_set = CacheDataset(cfg.cache_dir, cfg.labels_path, "train", augment=augment)
-    val_set = CacheDataset(cfg.cache_dir, cfg.labels_path, "val") if cfg.validate else None
+    train_set = CacheDataset(
+        cfg.cache_dir, cfg.labels_path, "train", augment=augment, read=cfg.cache_read
+    )
+    val_set = None
+    if cfg.validate:
+        val_set = CacheDataset(cfg.cache_dir, cfg.labels_path, "val", read=cfg.cache_read)
     steps_per_epoch = len(train_set) // cfg.batch_size
     total_steps = cfg.epochs * steps_per_epoch
 

@@ -60,7 +60,7 @@ def _predictions(
     path = run_dir / "eval" / f"predictions_{split}.parquet"
     if path.exists():
         return pd.read_parquet(path)
-    dataset = CacheDataset(cfg.cache_dir, cfg.labels_path, split)
+    dataset = CacheDataset(cfg.cache_dir, cfg.labels_path, split, read=cfg.cache_read)
     y, p = predict(model, dataset, cfg, device)
     table = pd.DataFrame({"image_id": dataset.image_ids, "patient_id": dataset.patient_ids})
     for j, label in enumerate(LABELS):

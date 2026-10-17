@@ -58,11 +58,33 @@ class Augment:
         )
 
 
+def _npy_layout(path: Path) -> tuple[int, tuple[int, int]]:
+    """Byte offset of the data in a .npy file, and the shape of one row."""
+    with open(path, "rb") as f:
+        major, _ = np.lib.format.read_magic(f)
+        if major == 1:
+            shape, fortran_order, dtype = np.lib.format.read_array_header_1_0(f)
+        else:
+            shape, fortran_order, dtype = np.lib.format.read_array_header_2_0(f)
+        offset = f.tell()
+    if fortran_order or dtype != np.int16 or len(shape) != 3:
+        raise ValueError(f"{path}: expected a C-order int16 array [N, H, W], got {dtype} {shape}")
+    return offset, (int(shape[1]), int(shape[2]))
+
+
 class CacheDataset(Dataset):
     """Images of one split from the HU cache. Rows with ok=False (corrupt files) are dropped.
 
-    Returns (x, y, i): x float32 (3, H, W) model input, y float32 (6,) labels, i dataset index.
-    Without augmentation, x equals brainct.preprocessing.window.model_input(cache_row).
+    Returns (x, y, i): y float32 (6,) labels, i dataset index, and x depending on `output`:
+        "model_input"  float32 (3, H, W); without augmentation it equals
+                       brainct.preprocessing.window.model_input(cache_row)
+        "hu"           int16 (H, W), the cache row as stored (no windowing or augmentation)
+
+    `read` chooses how a row is fetched from the .npy file:
+        "direct"  one positioned read of exactly one row's bytes (default). On network storage
+                  this is one request per image (compared with mmap in bench_loader.py).
+        "mmap"    numpy memmap; a row read can become many small page-fault reads.
+    Both return identical arrays.
     """
 
     def __init__(
@@ -71,7 +93,15 @@ class CacheDataset(Dataset):
         labels_path: str | Path,
         split: str,
         augment: Augment | None = None,
+        output: str = "model_input",
+        read: str = "direct",
     ) -> None:
+        if output not in ("model_input", "hu"):
+            raise ValueError(f"output must be 'model_input' or 'hu', got {output!r}")
+        if read not in ("direct", "mmap"):
+            raise ValueError(f"read must be 'direct' or 'mmap', got {read!r}")
+        if output == "hu" and augment is not None:
+            raise ValueError("augmentation needs output='model_input'")
         cache_dir = Path(cache_dir)
         index = pd.read_parquet(cache_dir / INDEX_FILE, columns=["row", "image_id", "split", "ok"])
         labels = pd.read_parquet(labels_path, columns=["image_id", "patient_id", *LABELS])
@@ -84,25 +114,51 @@ class CacheDataset(Dataset):
 
         self.split = split
         self.augment = augment
+        self.output = output
         self.rows = table["row"].to_numpy()
         self.image_ids = table["image_id"].to_numpy()
         self.patient_ids = table["patient_id"].to_numpy()
         self.labels = np.array(table[LABELS], dtype=np.float32)  # writable copy for torch
+        self.read = read
         self._cache_path = cache_dir / CACHE_FILE
-        self._cache: np.ndarray | None = None  # opened lazily, once per worker process
+        self._offset, self._row_shape = _npy_layout(self._cache_path)
+        self._row_bytes = int(np.prod(self._row_shape)) * np.dtype(np.int16).itemsize
+        # Opened lazily, once per DataLoader worker process (handles can't be shared across forks).
+        self._memmap: np.ndarray | None = None
+        self._file = None
 
     def __len__(self) -> int:
         return len(self.rows)
 
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        state["_memmap"], state["_file"] = None, None  # reopened in each worker
+        return state
+
+    def read_row(self, row: int) -> np.ndarray:
+        """One cache row as a writable int16 array."""
+        if self.read == "mmap":
+            if self._memmap is None:
+                self._memmap = np.load(self._cache_path, mmap_mode="r")
+            return np.array(self._memmap[row])
+        if self._file is None:
+            self._file = open(self._cache_path, "rb", buffering=0)  # kept open for the worker
+        hu = np.empty(self._row_shape, dtype=np.int16)
+        self._file.seek(self._offset + row * self._row_bytes)
+        if self._file.readinto(memoryview(hu).cast("B")) != self._row_bytes:
+            raise OSError(f"short read for cache row {row}")
+        return hu
+
     def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor, int]:
-        if self._cache is None:
-            self._cache = np.load(self._cache_path, mmap_mode="r")
-        hu = np.asarray(self._cache[self.rows[i]])
+        hu = self.read_row(int(self.rows[i]))
+        y = torch.from_numpy(self.labels[i])
+        if self.output == "hu":
+            return torch.from_numpy(hu), y, i
         x = torch.from_numpy(to_channels(hu))
         if self.augment is not None:
             x = self.augment(x)
         x = (x - _MEAN) / _STD
-        return x, torch.from_numpy(self.labels[i]), i
+        return x, y, i
 
 
 class EpochSampler(Sampler[int]):
