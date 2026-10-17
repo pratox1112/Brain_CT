@@ -4,7 +4,7 @@
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:a100:1
 #SBATCH --time=08:00:00
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=32
 #SBATCH --mem=64G
 #SBATCH --output=/scratch/%u/brainct/logs/train_%j.log
 

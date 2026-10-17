@@ -45,7 +45,7 @@ class TrainConfig:
 
     # Data loading
     cache_read: str = "direct"  # direct (one read per row) | mmap; see CacheDataset
-    num_workers: int = 12
+    num_workers: int = 28
     val_batch_size: int = 256
 
     # Run control

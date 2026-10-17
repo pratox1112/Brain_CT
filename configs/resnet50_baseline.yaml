@@ -30,7 +30,7 @@ translate: 0.05
 
 # Data loading
 cache_read: direct   # direct = one read per cache row; mmap = numpy memmap (see bench_loader.py)
-num_workers: 12
+num_workers: 28      # 2026-10-17 speed test: 1,268 img/s with bf16 AMP on an A100 (results.md)
 val_batch_size: 256
 
 # Run control
