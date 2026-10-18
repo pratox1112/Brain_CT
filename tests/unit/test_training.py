@@ -6,11 +6,10 @@ import json
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import pytest
 import torch
 
-from brainct.data.build_cache import CACHE_FILE, INDEX_FILE
+from brainct.data.build_cache import CACHE_FILE
 from brainct.data.labels import LABELS, SUBTYPES
 from brainct.preprocessing.window import model_input
 from brainct.training import bench_loader
@@ -29,41 +28,7 @@ from brainct.training.metrics import (
 from brainct.training.model import build_model
 from brainct.training.train import lr_factor, train, weighted_bce
 
-SIZE = 32  # tiny images keep CPU training fast; the real cache is 256 x 256
-
-
-@pytest.fixture
-def tiny_cache(tmp_path):
-    """48 images (16 per split, 2 per patient); every label has positives and negatives in
-    every split; one train image is marked ok=False like the real corrupt file."""
-    n = 48
-    cache_dir = tmp_path / "cache"
-    cache_dir.mkdir()
-    cache = np.lib.format.open_memmap(
-        cache_dir / CACHE_FILE, mode="w+", dtype=np.int16, shape=(n, SIZE, SIZE)
-    )
-    cache[:] = np.random.default_rng(0).integers(-1024, 1500, size=(n, SIZE, SIZE))
-    del cache
-
-    splits = ["train", "val", "test"]
-    ids = [f"ID_{k:03d}" for k in range(n)]
-    index = pd.DataFrame(
-        {
-            "row": range(n),
-            "image_id": ids,
-            "split": [splits[k // 16] for k in range(n)],
-            "ok": [k != 3 for k in range(n)],
-        }
-    )
-    index.to_parquet(cache_dir / INDEX_FILE, index=False)
-
-    labels = pd.DataFrame({"image_id": ids, "patient_id": [f"P_{k // 2}" for k in range(n)]})
-    for j, subtype in enumerate(SUBTYPES):
-        labels[subtype] = [int(k % 6 == j) for k in range(n)]  # k % 6 == 5 -> no bleed
-    labels["any"] = labels[SUBTYPES].max(axis=1)
-    labels_path = tmp_path / "labels.parquet"
-    labels[["image_id", "patient_id", *LABELS]].to_parquet(labels_path, index=False)
-    return {"cache_dir": cache_dir, "labels_path": labels_path, "tmp": tmp_path}
+SIZE = 32  # must match TINY_SIZE in tests/conftest.py (the tiny_cache fixture)
 
 
 def tiny_config(tiny_cache, **overrides) -> TrainConfig:
