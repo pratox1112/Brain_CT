@@ -281,3 +281,92 @@ Pixel format × rescale intercept (image counts):
 - Result: **305 / 305 sample and edge DICOMs compared, 0 missing, 0 mismatched.** The laptop's `preprocess_dicom` output is bit-identical to the cluster's, and so to the training cache.
 - `uv run pytest` on the laptop: **367 passed** (9.92 s), including `test_laptop_matches_cluster_preprocessing`.
 - **Phase 2 acceptance criteria met:** unit tests pass; the cache holds every image (752,802 ok plus 1 documented corrupt file); the cache matches fresh preprocessing (1,000 random rows plus 305 samples); and training and serving preprocessing are identical across machines.
+
+---
+
+## Phase 3 – Training
+
+### Phase 3 – Speed test, AMP off vs on (500 steps, no validation)
+- Date: 2026-10-16
+- Code: branch `training-code` (commit pushed by the owner; the cluster copy is not a git checkout)
+- Software: Python 3.11.17, torch 2.14.1+cu126, torchvision 0.29.1+cu126, CUDA 12.6
+- Command: `sbatch ~/Brain_CT/jobs/train.sh --set run_id=speed_amp_{off,on} --set amp={false,true} --set max_steps=500 --set validate=false`
+- Settings: ResNet-50 (ImageNet), batch 64, 256×256, channels_last, 12 DataLoader workers, 16 CPUs, augmentation on. Throughput excludes the first 20 steps.
+
+| Run | GPU (node) | AMP | Images/s | Peak GPU memory | W&B run |
+|---|---|---|---|---|---|
+| speed_amp_off | A100-SXM4-**40GB** (d1026) | off (fp32 with TF32) | **365.7** | **9.85 GB** | iyfbabw0 |
+| speed_amp_on | A100-SXM4-**80GB** (d1028) | bf16 | **345.8** | **4.16 GB** | wxlq7poe |
+
+- Findings:
+  - **Peak memory: −58% with bf16 AMP** (9.85 → 4.16 GB).
+  - **Throughput is the same with and without AMP** (346 vs 366 img/s, within noise). The GPU is **not** the bottleneck: training is limited by the input pipeline (12 CPU workers reading cache rows from network scratch, then windowing and augmenting each image on the CPU). The AMP speed benefit can't be measured until that's fixed.
+  - The two runs landed on different A100 variants (40 GB / 80 GB; same GPU chip). For the final AMP comparison, both runs should be on the same variant.
+  - At about 350 img/s, one epoch (600,389 images) takes about 29 min (derived, not measured).
+  - Job startup before the first step took about 3 min (imports from network scratch, dataset index, W&B init).
+
+### Phase 3 – Input-pipeline benchmark (no model, no GPU)
+- Date: 2026-10-16
+- Run ID: Slurm job on node d0003 (`short`, 32 CPUs, 64 GB). Elapsed 660 s.
+- Command: `sbatch ~/Brain_CT/jobs/bench_loader.sh` → `python -m brainct.training.bench_loader` (train split, batch 64, 100 timed batches after 5 warmup batches, a different random order per measurement)
+- Result (images/s):
+
+| Workers | read (cache row only) | window (+3 windows, normalize) | augment (+flip/affine) |
+|---|---|---|---|
+| 4 | 68.8 | 157.7 | 131.3 |
+| 8 | 92.6 | 227.7 | 218.3 |
+| 16 | 282.1 | 338.2 | 336.9 |
+| 32 | 503.4 | 465.9 | 488.6 |
+
+- Findings:
+  - **Reading cache rows is the bottleneck, not CPU work.** Adding windowing and augmentation doesn't lower throughput: at 16 and 32 workers all three stages are about the same. The "read" stage ran first, while the page cache was cold, which is probably why it looks slower than the others at 4 and 8 workers.
+  - Throughput rises almost **linearly with the number of workers**, while the data rate stays tiny (503 img/s × 128 KB ≈ 64 MB/s). That's the signature of **per-request latency, not bandwidth**: each worker spends most of its time waiting on storage.
+  - Likely cause: the cache is read through `np.load(mmap_mode="r")` on network scratch. A memmap row read becomes many small page-fault reads (128 KB ≈ 32 × 4 KB pages), each a network round trip, instead of one 128 KB request.
+
+### Phase 3 – Input-pipeline benchmark, direct reads vs memmap
+- Date: 2026-10-17
+- Run ID: Slurm job on node c0222 (`short`, 32 CPUs, 64 GB). Elapsed 118 s.
+- Change under test: `CacheDataset(read="direct")`, one seek + readinto of exactly one row (131,072 bytes) per image, instead of a numpy memmap.
+- Result (images/s, same job, same node; `read_direct` ran first with the coldest page cache):
+
+| Workers | read_direct | read_mmap | augment (full training path, direct reads) |
+|---|---|---|---|
+| 4 | **1,449.8** | 754.0 | 639.7 |
+| 8 | **2,433.1** | 891.2 | 959.8 |
+| 16 | **2,714.3** | 576.2 | 1,929.0 |
+| 32 | 1,837.1 | 944.5 | **2,553.5** |
+
+- Findings:
+  - **Direct reads are about 1.9–4.7× faster than memmap reads** within the same job (4 workers: 1,450 vs 754; 16 workers: 2,714 vs 576).
+  - **The full training input path now reaches 1,929 img/s with 16 workers and 2,554 img/s with 32 workers**, compared with the about 350 img/s seen in the speed test (12 workers, memmap). Bigger samples are needed to compare these exactly, since the conditions differ.
+  - With direct reads, **CPU work (windowing + augmentation) becomes the main cost at low worker counts** (4 workers: 640 augment vs 1,450 read), so the worker count matters again. At 32 workers the augment path comes close to the raw read rate.
+  - **Storage speed varies between runs:** memmap reads here (576–945 img/s) were much faster than in the 2026-10-16 benchmark (69–503 img/s, node d0003, 22:05). Network scratch load changes over time, so only **same-job** comparisons are reliable.
+  - These were measured on a CPU node; the GPU node's CPUs and network path may differ.
+
+### Phase 3 – Speed test, AMP off vs on, after the input-pipeline fix (same GPU)
+- Date: 2026-10-17
+- Run ID: one Slurm job running both tests back to back on node d1029 (W&B runs `9lfo6gn1` = AMP off, `7pz2aeuj` = AMP on)
+- Hardware: **NVIDIA A100-SXM4-80GB, the same GPU for both runs**; 32 CPUs, 64 GB
+- Software: Python 3.11.17, torch 2.14.1+cu126, torchvision 0.29.1+cu126, CUDA 12.6
+- Settings: ResNet-50, batch 64, 256×256, channels_last, augmentation on, **28 DataLoader workers, direct cache reads**, 500 steps, no validation. Throughput over 480 steps (the first 20 excluded).
+- Command: `sbatch ... --cpus-per-task=32 --wrap '... for amp in false true; do python -m brainct.training.train --config configs/resnet50_baseline.yaml --set run_id=speed2_amp_$amp --set amp=$amp --set max_steps=500 --set validate=false --set num_workers=28; done'`
+
+| Run | AMP | Images/s | Peak GPU memory |
+|---|---|---|---|
+| speed2_amp_false | off (fp32 with TF32) | **806.8** | **9.85 GB** |
+| speed2_amp_true | bf16 autocast | **1,268.1** | **4.16 GB** |
+
+- **AMP (bf16): 1.57× training throughput (806.8 → 1,268.1 img/s) and −57.7% peak GPU memory (9.85 → 4.16 GB)**, on the same A100-80GB.
+- Compared with the first speed test (memmap, 12 workers, about 350 img/s on both settings), the fixed pipeline is **2.3× faster without AMP and 3.7× faster with AMP**. Caveat: different days and nodes, and the first AMP-off run was on a 40 GB A100.
+- Projected epoch time at 1,268 img/s: 600,389 / 1,268 ≈ 7.9 min, so 5 epochs ≈ 40 min plus validation (derived, not measured).
+- Not yet verified: whether AMP-on is now GPU-bound. 28 workers reached about 2,550 img/s in the CPU-node benchmark (above 1,268), which suggests it is, but that wasn't measured on this node.
+
+### Phase 3 – Smoke run with forced resume, attempt 1 (FAILED: bug found)
+- Date: 2026-10-17
+- Run ID: `smoke`, 3 chained `gpu-short` jobs 11173509 / 11173510 / 11173511 on node d1029 (A100-SXM4-80GB). W&B run `zgkj6hg2`.
+- Settings: `epochs=1`, `time_budget_hours=0.05`, defaults otherwise (bf16 AMP, 28 workers, direct reads)
+- Result:
+  - Job 1: trained 3,292 steps, then stopped on the time budget as designed and saved `last.pt`. Throughput **1,318.7 img/s** over 3,272 steps, peak memory 4.16 GB.
+  - **Jobs 2 and 3 crashed while resuming:** `TypeError: RNG state must be a torch.ByteTensor` in `torch.set_rng_state`.
+  - **Cause:** the checkpoint was loaded with `map_location=<cuda device>`, which also moved the saved RNG states to the GPU. The CPU-only laptop tests couldn't catch it.
+  - **Fix:** `load_checkpoint()` always loads with `map_location="cpu"`, and `load_state_dict` moves weights and optimizer state to the parameters' device. Added a regression test (`test_checkpoint_loads_on_cpu_and_rng_state_restores`).

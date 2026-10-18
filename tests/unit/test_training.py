@@ -14,6 +14,7 @@ from brainct.data.build_cache import CACHE_FILE, INDEX_FILE
 from brainct.data.labels import LABELS, SUBTYPES
 from brainct.preprocessing.window import model_input
 from brainct.training import bench_loader
+from brainct.training import train as train_module
 from brainct.training.config import TrainConfig, load_config
 from brainct.training.dataset import Augment, CacheDataset, EpochSampler
 from brainct.training.evaluate import TestAlreadyEvaluatedError, evaluate
@@ -252,6 +253,28 @@ def test_train_resumes_after_stopping_on_time_budget(tiny_cache):
         if "train/loss" in line
     ]
     assert steps == list(range(1, 7))  # no gap and no repeat across the resume
+
+
+def test_checkpoint_loads_on_cpu_and_rng_state_restores(tiny_cache, monkeypatch):
+    # Regression test for the 2026-10-17 cluster failure: loading with map_location=<cuda>
+    # moved the RNG states to the GPU and torch.set_rng_state raised a TypeError on resume.
+    train(tiny_config(tiny_cache, time_budget_hours=0.0))  # writes checkpoints/last.pt
+    last = tiny_config(tiny_cache).run_dir / "checkpoints" / "last.pt"
+    seen = {}
+    real_load = torch.load
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(train_module.torch, "load", spy)
+
+    ckpt = train_module.load_checkpoint(last)
+
+    assert seen["map_location"] == "cpu"
+    rng = ckpt["rng"]["torch"]
+    assert rng.device.type == "cpu" and rng.dtype == torch.uint8
+    train_module._set_rng_state(ckpt["rng"])  # must not raise
 
 
 def test_max_steps_marks_a_speed_test_complete(tiny_cache):

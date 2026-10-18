@@ -84,6 +84,16 @@ def _set_rng_state(state: dict[str, Any]) -> None:
         torch.cuda.set_rng_state_all(state["cuda"])
 
 
+def load_checkpoint(path: Path) -> dict[str, Any]:
+    """Load a checkpoint onto the CPU.
+
+    Never map it to the GPU: the saved RNG states must stay CPU ByteTensors for
+    torch.set_rng_state (a GPU map_location broke resume on the cluster, 2026-10-17).
+    load_state_dict copies model and optimizer tensors to their parameters' device.
+    """
+    return torch.load(path, map_location="cpu", weights_only=False)
+
+
 def _save_atomic(obj: Any, path: Path) -> None:
     """Write to a temporary file first, so a job killed mid-save never corrupts a checkpoint."""
     tmp = path.with_suffix(".tmp")
@@ -206,7 +216,7 @@ def train(cfg: TrainConfig) -> dict[str, Any]:
     }
     last_ckpt = ckpt_dir / "last.pt"
     if last_ckpt.exists():
-        ckpt = torch.load(last_ckpt, map_location=device, weights_only=False)
+        ckpt = load_checkpoint(last_ckpt)
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
