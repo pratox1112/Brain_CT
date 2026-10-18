@@ -10,6 +10,11 @@ dependencies = [
     "pillow>=10.1",
     "pyarrow>=15",
     "pydicom>=3.0",
+    "pyyaml>=6.0",
+    "scikit-learn>=1.4",
+    "torch>=2.4",
+    "torchvision>=0.19",
+    "wandb>=0.17",
 ]
 
 [dependency-groups]
@@ -17,6 +22,17 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
 ]
+
+# Laptop and CI use CPU builds of PyTorch (small, no GPU). The cluster keeps its own CUDA 12.6
+# build, installed once by hand; `uv pip install -e` there leaves it in place.
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]

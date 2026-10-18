@@ -281,3 +281,206 @@ Pixel format × rescale intercept (image counts):
 - Result: **305 / 305 sample and edge DICOMs compared, 0 missing, 0 mismatched.** The laptop's `preprocess_dicom` output is bit-identical to the cluster's, and so to the training cache.
 - `uv run pytest` on the laptop: **367 passed** (9.92 s), including `test_laptop_matches_cluster_preprocessing`.
 - **Phase 2 acceptance criteria met:** unit tests pass; the cache holds every image (752,802 ok plus 1 documented corrupt file); the cache matches fresh preprocessing (1,000 random rows plus 305 samples); and training and serving preprocessing are identical across machines.
+
+---
+
+## Phase 3 – Training
+
+### Phase 3 – Speed test, AMP off vs on (500 steps, no validation)
+- Date: 2026-10-16
+- Code: branch `training-code` (commit pushed by the owner; the cluster copy is not a git checkout)
+- Software: Python 3.11.17, torch 2.14.1+cu126, torchvision 0.29.1+cu126, CUDA 12.6
+- Command: `sbatch ~/Brain_CT/jobs/train.sh --set run_id=speed_amp_{off,on} --set amp={false,true} --set max_steps=500 --set validate=false`
+- Settings: ResNet-50 (ImageNet), batch 64, 256×256, channels_last, 12 DataLoader workers, 16 CPUs, augmentation on. Throughput excludes the first 20 steps.
+
+| Run | GPU (node) | AMP | Images/s | Peak GPU memory | W&B run |
+|---|---|---|---|---|---|
+| speed_amp_off | A100-SXM4-**40GB** (d1026) | off (fp32 with TF32) | **365.7** | **9.85 GB** | iyfbabw0 |
+| speed_amp_on | A100-SXM4-**80GB** (d1028) | bf16 | **345.8** | **4.16 GB** | wxlq7poe |
+
+- Findings:
+  - **Peak memory: −58% with bf16 AMP** (9.85 → 4.16 GB).
+  - **Throughput is the same with and without AMP** (346 vs 366 img/s, within noise). The GPU is **not** the bottleneck: training is limited by the input pipeline (12 CPU workers reading cache rows from network scratch, then windowing and augmenting each image on the CPU). The AMP speed benefit can't be measured until that's fixed.
+  - The two runs landed on different A100 variants (40 GB / 80 GB; same GPU chip). For the final AMP comparison, both runs should be on the same variant.
+  - At about 350 img/s, one epoch (600,389 images) takes about 29 min (derived, not measured).
+  - Job startup before the first step took about 3 min (imports from network scratch, dataset index, W&B init).
+
+### Phase 3 – Input-pipeline benchmark (no model, no GPU)
+- Date: 2026-10-16
+- Run ID: Slurm job on node d0003 (`short`, 32 CPUs, 64 GB). Elapsed 660 s.
+- Command: `sbatch ~/Brain_CT/jobs/bench_loader.sh` → `python -m brainct.training.bench_loader` (train split, batch 64, 100 timed batches after 5 warmup batches, a different random order per measurement)
+- Result (images/s):
+
+| Workers | read (cache row only) | window (+3 windows, normalize) | augment (+flip/affine) |
+|---|---|---|---|
+| 4 | 68.8 | 157.7 | 131.3 |
+| 8 | 92.6 | 227.7 | 218.3 |
+| 16 | 282.1 | 338.2 | 336.9 |
+| 32 | 503.4 | 465.9 | 488.6 |
+
+- Findings:
+  - **Reading cache rows is the bottleneck, not CPU work.** Adding windowing and augmentation doesn't lower throughput: at 16 and 32 workers all three stages are about the same. The "read" stage ran first, while the page cache was cold, which is probably why it looks slower than the others at 4 and 8 workers.
+  - Throughput rises almost **linearly with the number of workers**, while the data rate stays tiny (503 img/s × 128 KB ≈ 64 MB/s). That's the signature of **per-request latency, not bandwidth**: each worker spends most of its time waiting on storage.
+  - Likely cause: the cache is read through `np.load(mmap_mode="r")` on network scratch. A memmap row read becomes many small page-fault reads (128 KB ≈ 32 × 4 KB pages), each a network round trip, instead of one 128 KB request.
+
+### Phase 3 – Input-pipeline benchmark, direct reads vs memmap
+- Date: 2026-10-17
+- Run ID: Slurm job on node c0222 (`short`, 32 CPUs, 64 GB). Elapsed 118 s.
+- Change under test: `CacheDataset(read="direct")`, one seek + readinto of exactly one row (131,072 bytes) per image, instead of a numpy memmap.
+- Result (images/s, same job, same node; `read_direct` ran first with the coldest page cache):
+
+| Workers | read_direct | read_mmap | augment (full training path, direct reads) |
+|---|---|---|---|
+| 4 | **1,449.8** | 754.0 | 639.7 |
+| 8 | **2,433.1** | 891.2 | 959.8 |
+| 16 | **2,714.3** | 576.2 | 1,929.0 |
+| 32 | 1,837.1 | 944.5 | **2,553.5** |
+
+- Findings:
+  - **Direct reads are about 1.9–4.7× faster than memmap reads** within the same job (4 workers: 1,450 vs 754; 16 workers: 2,714 vs 576).
+  - **The full training input path now reaches 1,929 img/s with 16 workers and 2,554 img/s with 32 workers**, compared with the about 350 img/s seen in the speed test (12 workers, memmap). Bigger samples are needed to compare these exactly, since the conditions differ.
+  - With direct reads, **CPU work (windowing + augmentation) becomes the main cost at low worker counts** (4 workers: 640 augment vs 1,450 read), so the worker count matters again. At 32 workers the augment path comes close to the raw read rate.
+  - **Storage speed varies between runs:** memmap reads here (576–945 img/s) were much faster than in the 2026-10-16 benchmark (69–503 img/s, node d0003, 22:05). Network scratch load changes over time, so only **same-job** comparisons are reliable.
+  - These were measured on a CPU node; the GPU node's CPUs and network path may differ.
+
+### Phase 3 – Speed test, AMP off vs on, after the input-pipeline fix (same GPU)
+- Date: 2026-10-17
+- Run ID: one Slurm job running both tests back to back on node d1029 (W&B runs `9lfo6gn1` = AMP off, `7pz2aeuj` = AMP on)
+- Hardware: **NVIDIA A100-SXM4-80GB, the same GPU for both runs**; 32 CPUs, 64 GB
+- Software: Python 3.11.17, torch 2.14.1+cu126, torchvision 0.29.1+cu126, CUDA 12.6
+- Settings: ResNet-50, batch 64, 256×256, channels_last, augmentation on, **28 DataLoader workers, direct cache reads**, 500 steps, no validation. Throughput over 480 steps (the first 20 excluded).
+- Command: `sbatch ... --cpus-per-task=32 --wrap '... for amp in false true; do python -m brainct.training.train --config configs/resnet50_baseline.yaml --set run_id=speed2_amp_$amp --set amp=$amp --set max_steps=500 --set validate=false --set num_workers=28; done'`
+
+| Run | AMP | Images/s | Peak GPU memory |
+|---|---|---|---|
+| speed2_amp_false | off (fp32 with TF32) | **806.8** | **9.85 GB** |
+| speed2_amp_true | bf16 autocast | **1,268.1** | **4.16 GB** |
+
+- **AMP (bf16): 1.57× training throughput (806.8 → 1,268.1 img/s) and −57.7% peak GPU memory (9.85 → 4.16 GB)**, on the same A100-80GB.
+- Compared with the first speed test (memmap, 12 workers, about 350 img/s on both settings), the fixed pipeline is **2.3× faster without AMP and 3.7× faster with AMP**. Caveat: different days and nodes, and the first AMP-off run was on a 40 GB A100.
+- Projected epoch time at 1,268 img/s: 600,389 / 1,268 ≈ 7.9 min, so 5 epochs ≈ 40 min plus validation (derived, not measured).
+- Not yet verified: whether AMP-on is now GPU-bound. 28 workers reached about 2,550 img/s in the CPU-node benchmark (above 1,268), which suggests it is, but that wasn't measured on this node.
+
+### Phase 3 – Smoke run with forced resume, attempt 1 (FAILED: bug found)
+- Date: 2026-10-17
+- Run ID: `smoke`, 3 chained `gpu-short` jobs 11173509 / 11173510 / 11173511 on node d1029 (A100-SXM4-80GB). W&B run `zgkj6hg2`.
+- Settings: `epochs=1`, `time_budget_hours=0.05`, defaults otherwise (bf16 AMP, 28 workers, direct reads)
+- Result:
+  - Job 1: trained 3,292 steps, then stopped on the time budget as designed and saved `last.pt`. Throughput **1,318.7 img/s** over 3,272 steps, peak memory 4.16 GB.
+  - **Jobs 2 and 3 crashed while resuming:** `TypeError: RNG state must be a torch.ByteTensor` in `torch.set_rng_state`.
+  - **Cause:** the checkpoint was loaded with `map_location=<cuda device>`, which also moved the saved RNG states to the GPU. The CPU-only laptop tests couldn't catch it.
+  - **Fix:** `load_checkpoint()` always loads with `map_location="cpu"`, and `load_state_dict` moves weights and optimizer state to the parameters' device. Added a regression test (`test_checkpoint_loads_on_cpu_and_rng_state_restores`).
+
+### Phase 3 – Smoke run with forced resume, attempt 2 (PASSED)
+- Date: 2026-10-17
+- Run ID: `smoke2`, 3 chained `gpu-short` jobs (first two 11174092 / 11174093) on A100-SXM4-80GB (node d1028). W&B run `i76rqmcl`, the same run continued across all jobs.
+- Settings: `epochs=1`, `time_budget_hours=0.08`, defaults otherwise (bf16 AMP, 28 workers, direct reads), code including the `load_checkpoint` CPU fix
+- Result:
+  - Job 1: steps 1–2,879, then stopped on the time budget (707.6 img/s).
+  - **Job 2: `Resumed at step 2879 (epoch 0, batch 2879)`**, exactly where job 1 stopped. Job 3 resumed again and finished the epoch (3,385 steps in that job, 637.3 img/s).
+  - **Complete: 9,381 / 9,381 steps (1 epoch), validation ran once, best checkpoint saved.**
+  - **Val macro AUC after 1 epoch: 0.9704** (5 subtypes). A smoke-test number, not a result: 1 epoch, with the LR schedule compressed into 1 epoch.
+  - Peak memory 4.16 GB. Total train time across jobs 0.26 h.
+- Notes:
+  - **Acceptance check met: a run survives forced resumes.**
+  - Throughput tonight was 637–708 img/s, against 1,268–1,319 earlier the same day on the same GPU type. That's consistent with shared network-scratch load varying over the day, since the input pipeline is still storage-sensitive.
+
+### Phase 3 – Baseline training run (`resnet50_baseline`)
+- Date: 2026-10-17 (20:41:58 → 21:28:02 EDT)
+- Run ID: `resnet50_baseline`, W&B run `v4x48mvs`. Model artifact `resnet50_baseline-model:best` uploaded to W&B.
+- Hardware: NVIDIA A100-SXM4-80GB (node d1029), 32 CPUs, 64 GB; finished in the first chained job
+- Software: Python 3.11.17, torch 2.14.1+cu126, torchvision 0.29.1+cu126, CUDA 12.6
+- Command: `bash ~/Brain_CT/jobs/train_chain.sh 2 --set run_id=resnet50_baseline` (config `configs/resnet50_baseline.yaml`: ResNet-50 ImageNet IMAGENET1K_V2, 6 outputs, weighted BCE any=2, AdamW lr 3e-4 wd 1e-4, batch 64, 1,000 warmup steps then cosine, bf16 AMP, augmentation, 28 workers, direct reads, seed 2026)
+- Result:
+
+| Metric | Value |
+|---|---|
+| Steps / epochs | 46,905 / 5 (complete) |
+| **Best val macro AUC (5 subtypes)** | **0.9743** at epoch index 4 (the last epoch) |
+| Training throughput | **1,109.1 img/s** (over 46,885 steps, bf16) |
+| Peak GPU memory | 4.16 GB |
+| Training time | **0.757 h (45.4 min)**; job wall time 2,763 s including startup and 5 validations |
+
+- Notes:
+  - Val AUC per label rose across epochs (W&B sparklines); the best epoch was the last one, so more epochs might still help. A candidate for Phase 4, judged on val only.
+  - This is the val number used for model selection. Final per-subtype AUCs with confidence intervals come from `evaluate.py` (val), and the test numbers from a single test evaluation.
+- Val AUC per epoch (from `metrics.jsonl`, logged at the end of each epoch):
+
+| Epoch | any | epidural | intraparenchymal | intraventricular | subarachnoid | subdural | **macro (5 subtypes)** |
+|---|---|---|---|---|---|---|---|
+| 0 | 0.9665 | 0.9427 | 0.9791 | 0.9869 | 0.9525 | 0.9554 | **0.9633** |
+| 1 | 0.9673 | 0.9552 | 0.9814 | 0.9889 | 0.9578 | 0.9547 | **0.9676** |
+| 2 | 0.9747 | 0.9566 | 0.9843 | 0.9911 | 0.9646 | 0.9635 | **0.9720** |
+| 3 | 0.9763 | 0.9544 | 0.9855 | 0.9922 | 0.9678 | 0.9666 | **0.9733** |
+| 4 | 0.9765 | 0.9588 | 0.9853 | 0.9922 | 0.9680 | 0.9671 | **0.9743** |
+
+  - Macro AUC gains per epoch: +0.0043, +0.0044, +0.0013, +0.0010. Improvement is slowing, but not flat, at the end of the cosine schedule (the LR reaches 0 at epoch 5).
+  - Weakest subtypes: **epidural** (0.959, and noisy across epochs, as expected from only 31 val patients / 341 positive images), then **subdural** (0.967) and **subarachnoid** (0.968). Strongest: intraventricular (0.992) and intraparenchymal (0.985).
+
+### Phase 3 – Baseline evaluation on val (`evaluate.py`, bf16 inference)
+- Date: 2026-10-18
+- Command: `sbatch ~/Brain_CT/jobs/evaluate.sh resnet50_baseline val` (best.pt = epoch index 4; inference with the run's config, i.e. bf16 autocast; 1,000 patient-level bootstrap resamples, seed 2026)
+- Val set: 75,840 images, 1,894 patients
+- Result:
+
+| Label | ROC AUC | 95% CI (patient bootstrap) | F1 at val-chosen threshold | Threshold |
+|---|---|---|---|---|
+| any | 0.9765 | 0.9735–0.9797 | 0.838 | 0.383 |
+| epidural | 0.9588 | **0.9421–0.9728** | **0.288** | 0.196 |
+| intraparenchymal | 0.9853 | 0.9814–0.9886 | 0.807 | 0.440 |
+| intraventricular | 0.9922 | 0.9901–0.9940 | 0.830 | 0.369 |
+| subarachnoid | 0.9680 | 0.9621–0.9731 | 0.684 | 0.247 |
+| subdural | 0.9670 | 0.9610–0.9727 | 0.705 | 0.369 |
+| **macro (5 subtypes)** | **0.9743** | **0.9703–0.9780** | **macro F1 0.663** | — |
+
+- Notes:
+  - The AUCs match the in-training validation of epoch 4 (macro 0.97426), as expected for the same checkpoint and precision.
+  - **Epidural has a high AUC but a low F1 (0.288).** At a 0.45% prevalence, even a good ranking produces many false positives per true positive at any threshold. F1 and precision-recall metrics show this; ROC AUC does not. Macro F1 is pulled down mainly by epidural.
+  - **Ties from bf16 inference:** the intraventricular and subdural thresholds are bit-identical (0.36931508779525757). With bf16 autocast, the final layer outputs bf16 logits, so the probabilities fall on a coarse grid with many ties. The effect on AUC is probably small, but evaluation should use **fp32 inference** (no ties, and comparable to the Phase 5a ONNX FP32 / INT8 numbers). To redo before the test evaluation.
+
+### Phase 3 – Final model (`resnet50_baseline`) on val, fp32 inference
+- Date: 2026-10-18
+- Decision (owner, 2026-10-18): **the 5-epoch baseline is the final model**; no Phase 4 tuning run.
+- Command: `sbatch ~/Brain_CT/jobs/evaluate.sh resnet50_baseline val` (evaluate.py now forces fp32 inference; 1,000 patient bootstrap resamples, seed 2026)
+- Val set: 75,840 images, 1,894 patients
+- Result:
+
+| Label | ROC AUC | 95% CI | Average precision | F1 | Threshold (from val) |
+|---|---|---|---|---|---|
+| any | 0.9766 | 0.9736–0.9797 | 0.906 | 0.838 | 0.380 |
+| epidural | 0.9588 | 0.9424–0.9727 | **0.220** | **0.288** | 0.184 |
+| intraparenchymal | 0.9853 | 0.9814–0.9887 | 0.877 | 0.807 | 0.448 |
+| intraventricular | 0.9922 | 0.9901–0.9940 | 0.872 | 0.830 | 0.376 |
+| subarachnoid | 0.9681 | 0.9622–0.9732 | 0.747 | 0.685 | 0.263 |
+| subdural | 0.9671 | 0.9611–0.9727 | 0.774 | 0.706 | 0.355 |
+| **macro (5 subtypes)** | **0.9743** | **0.9703–0.9780** | **0.698** | **0.663** | — |
+
+- Notes:
+  - **The tie problem is gone:** all 6 thresholds are now distinct (with bf16, IVH and SDH were bit-identical).
+  - **fp32 vs bf16 inference changes AUC very little:** macro 0.97431 vs 0.97426 (+0.00005); every label within ±0.0004.
+  - **Epidural:** average precision 0.220 against a chance level equal to its prevalence (0.45%), about 49× better than chance, yet still the clear weak point. Its F1 of 0.288 means many false alarms per true detection at the best threshold.
+  - These thresholds are the ones applied unchanged to test.
+
+### Phase 3 – **FINAL MODEL ON TEST (evaluated once)** — headline numbers
+- Date: 2026-10-18
+- Model: `resnet50_baseline` best.pt (epoch index 4), W&B run `v4x48mvs`, artifact `resnet50_baseline-model`
+- Command: `sbatch ~/Brain_CT/jobs/evaluate.sh resnet50_baseline test` (fp32 inference; **thresholds from val, unchanged**; 1,000 patient bootstrap resamples, seed 2026)
+- Test set: **76,573 images, 1,894 patients** (patient-level split, no overlap with train or val)
+- Result:
+
+| Label | ROC AUC | 95% CI | Average precision | F1 (val threshold) |
+|---|---|---|---|---|
+| any | 0.9773 | 0.9741–0.9805 | 0.911 | 0.839 |
+| epidural | 0.9715 | 0.9537–0.9838 | 0.283 | 0.327 |
+| intraparenchymal | 0.9845 | 0.9818–0.9870 | 0.866 | 0.797 |
+| intraventricular | 0.9926 | 0.9906–0.9942 | 0.897 | 0.831 |
+| subarachnoid | 0.9701 | 0.9646–0.9748 | 0.746 | 0.677 |
+| subdural | 0.9648 | 0.9576–0.9711 | 0.753 | 0.695 |
+| **macro (5 subtypes)** | **0.9767** | **0.9727–0.9801** | **0.709** | **0.665** |
+
+- Notes:
+  - The thresholds are identical to the val ones (0.380 / 0.184 / 0.448 / 0.376 / 0.263 / 0.355), confirming that nothing was tuned on test.
+  - Test vs val macro AUC: 0.9767 vs 0.9743. The intervals overlap (val 0.9703–0.9780), so the difference is within sampling noise.
+  - **Epidural** test AUC 0.9715 vs val 0.9588: its intervals are the widest (31 patients per split), so the gap is consistent with noise. Epidural remains the weak class on average precision (0.283) and F1 (0.327).
+  - **Weakest by AUC: subdural (0.965) and subarachnoid (0.970).** These are thin or diffuse bleeds that benefit from neighbouring-slice context, which this single-slice model doesn't have (a known limitation).
+  - **Resume-line numbers:** macro AUC **0.977** (95% CI 0.973–0.980) across 5 subtypes on a patient-level held-out test set of 76,573 images from 1,894 patients.
