@@ -10,8 +10,10 @@ Usage (on the cluster, inside a Slurm GPU job - see jobs/evaluate.sh):
 The test split is evaluated **once** per run: a second test evaluation is refused unless
 --force is given, so the reported test numbers cannot be tuned against.
 
+Inference runs in fp32 regardless of the training config (see INFERENCE_PRECISION).
+
 Outputs in <run_dir>/eval/:
-    predictions_<split>.parquet   image_id, patient_id, labels and probabilities
+    predictions_<split>_fp32.parquet   image_id, patient_id, labels and probabilities
     metrics_<split>.json          the full report for the split
 """
 
@@ -35,6 +37,11 @@ from brainct.training.metrics import best_f1_thresholds, report
 from brainct.training.model import build_model
 from brainct.training.train import predict
 
+# Evaluation always runs in full precision. With bf16 autocast the final layer outputs bf16
+# logits, so probabilities fall on a coarse grid with many ties (seen 2026-10-18: two labels got
+# bit-identical thresholds). fp32 also matches the Phase 5a ONNX FP32 / INT8 comparison.
+INFERENCE_PRECISION = "fp32"
+
 
 class TestAlreadyEvaluatedError(RuntimeError):
     """The test split was already evaluated for this run."""
@@ -56,8 +63,8 @@ def _load_run(run_dir: Path, overrides: list[str]) -> tuple[TrainConfig, torch.n
 def _predictions(
     run_dir: Path, cfg: TrainConfig, model: torch.nn.Module, split: str, device: torch.device
 ) -> pd.DataFrame:
-    """Predict a split, reusing saved predictions if they exist."""
-    path = run_dir / "eval" / f"predictions_{split}.parquet"
+    """Predict a split in fp32, reusing saved fp32 predictions if they exist."""
+    path = run_dir / "eval" / f"predictions_{split}_{INFERENCE_PRECISION}.parquet"
     if path.exists():
         return pd.read_parquet(path)
     dataset = CacheDataset(cfg.cache_dir, cfg.labels_path, split, read=cfg.cache_read)
@@ -95,6 +102,7 @@ def evaluate(
         )
 
     cfg, model, weights = _load_run(run_dir, overrides or [])
+    cfg.amp = False  # INFERENCE_PRECISION: no autocast during evaluation
     use_cuda = cfg.device == "cuda" and torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
     model = model.to(device)
@@ -116,6 +124,7 @@ def evaluate(
             "patients": int(table["patient_id"].nunique()),
             "evaluated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "thresholds_from": "val",
+            "inference_precision": INFERENCE_PRECISION,
         }
     )
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,8 +152,10 @@ def _log_to_wandb(cfg: TrainConfig, run_dir: Path, split: str, result: dict[str,
     )
     flat = {f"{split}/auc_{k}": v for k, v in result["auc"].items()}
     flat.update({f"{split}/f1_{k}": v for k, v in result["f1"].items()})
+    flat.update({f"{split}/ap_{k}": v for k, v in result["average_precision"].items()})
     flat[f"{split}/macro_auc"] = result["macro_auc"]
     flat[f"{split}/macro_f1"] = result["macro_f1"]
+    flat[f"{split}/macro_average_precision"] = result["macro_average_precision"]
     for label, (low, high) in result.get("auc_ci95", {}).items():
         flat[f"{split}/auc_{label}_ci95_low"] = low
         flat[f"{split}/auc_{label}_ci95_high"] = high

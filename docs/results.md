@@ -370,3 +370,70 @@ Pixel format × rescale intercept (image counts):
   - **Jobs 2 and 3 crashed while resuming:** `TypeError: RNG state must be a torch.ByteTensor` in `torch.set_rng_state`.
   - **Cause:** the checkpoint was loaded with `map_location=<cuda device>`, which also moved the saved RNG states to the GPU. The CPU-only laptop tests couldn't catch it.
   - **Fix:** `load_checkpoint()` always loads with `map_location="cpu"`, and `load_state_dict` moves weights and optimizer state to the parameters' device. Added a regression test (`test_checkpoint_loads_on_cpu_and_rng_state_restores`).
+
+### Phase 3 – Smoke run with forced resume, attempt 2 (PASSED)
+- Date: 2026-10-17
+- Run ID: `smoke2`, 3 chained `gpu-short` jobs (first two 11174092 / 11174093) on A100-SXM4-80GB (node d1028). W&B run `i76rqmcl`, the same run continued across all jobs.
+- Settings: `epochs=1`, `time_budget_hours=0.08`, defaults otherwise (bf16 AMP, 28 workers, direct reads), code including the `load_checkpoint` CPU fix
+- Result:
+  - Job 1: steps 1–2,879, then stopped on the time budget (707.6 img/s).
+  - **Job 2: `Resumed at step 2879 (epoch 0, batch 2879)`**, exactly where job 1 stopped. Job 3 resumed again and finished the epoch (3,385 steps in that job, 637.3 img/s).
+  - **Complete: 9,381 / 9,381 steps (1 epoch), validation ran once, best checkpoint saved.**
+  - **Val macro AUC after 1 epoch: 0.9704** (5 subtypes). A smoke-test number, not a result: 1 epoch, with the LR schedule compressed into 1 epoch.
+  - Peak memory 4.16 GB. Total train time across jobs 0.26 h.
+- Notes:
+  - **Acceptance check met: a run survives forced resumes.**
+  - Throughput tonight was 637–708 img/s, against 1,268–1,319 earlier the same day on the same GPU type. That's consistent with shared network-scratch load varying over the day, since the input pipeline is still storage-sensitive.
+
+### Phase 3 – Baseline training run (`resnet50_baseline`)
+- Date: 2026-10-17 (20:41:58 → 21:28:02 EDT)
+- Run ID: `resnet50_baseline`, W&B run `v4x48mvs`. Model artifact `resnet50_baseline-model:best` uploaded to W&B.
+- Hardware: NVIDIA A100-SXM4-80GB (node d1029), 32 CPUs, 64 GB; finished in the first chained job
+- Software: Python 3.11.17, torch 2.14.1+cu126, torchvision 0.29.1+cu126, CUDA 12.6
+- Command: `bash ~/Brain_CT/jobs/train_chain.sh 2 --set run_id=resnet50_baseline` (config `configs/resnet50_baseline.yaml`: ResNet-50 ImageNet IMAGENET1K_V2, 6 outputs, weighted BCE any=2, AdamW lr 3e-4 wd 1e-4, batch 64, 1,000 warmup steps then cosine, bf16 AMP, augmentation, 28 workers, direct reads, seed 2026)
+- Result:
+
+| Metric | Value |
+|---|---|
+| Steps / epochs | 46,905 / 5 (complete) |
+| **Best val macro AUC (5 subtypes)** | **0.9743** at epoch index 4 (the last epoch) |
+| Training throughput | **1,109.1 img/s** (over 46,885 steps, bf16) |
+| Peak GPU memory | 4.16 GB |
+| Training time | **0.757 h (45.4 min)**; job wall time 2,763 s including startup and 5 validations |
+
+- Notes:
+  - Val AUC per label rose across epochs (W&B sparklines); the best epoch was the last one, so more epochs might still help. A candidate for Phase 4, judged on val only.
+  - This is the val number used for model selection. Final per-subtype AUCs with confidence intervals come from `evaluate.py` (val), and the test numbers from a single test evaluation.
+- Val AUC per epoch (from `metrics.jsonl`, logged at the end of each epoch):
+
+| Epoch | any | epidural | intraparenchymal | intraventricular | subarachnoid | subdural | **macro (5 subtypes)** |
+|---|---|---|---|---|---|---|---|
+| 0 | 0.9665 | 0.9427 | 0.9791 | 0.9869 | 0.9525 | 0.9554 | **0.9633** |
+| 1 | 0.9673 | 0.9552 | 0.9814 | 0.9889 | 0.9578 | 0.9547 | **0.9676** |
+| 2 | 0.9747 | 0.9566 | 0.9843 | 0.9911 | 0.9646 | 0.9635 | **0.9720** |
+| 3 | 0.9763 | 0.9544 | 0.9855 | 0.9922 | 0.9678 | 0.9666 | **0.9733** |
+| 4 | 0.9765 | 0.9588 | 0.9853 | 0.9922 | 0.9680 | 0.9671 | **0.9743** |
+
+  - Macro AUC gains per epoch: +0.0043, +0.0044, +0.0013, +0.0010. Improvement is slowing, but not flat, at the end of the cosine schedule (the LR reaches 0 at epoch 5).
+  - Weakest subtypes: **epidural** (0.959, and noisy across epochs, as expected from only 31 val patients / 341 positive images), then **subdural** (0.967) and **subarachnoid** (0.968). Strongest: intraventricular (0.992) and intraparenchymal (0.985).
+
+### Phase 3 – Baseline evaluation on val (`evaluate.py`, bf16 inference)
+- Date: 2026-10-18
+- Command: `sbatch ~/Brain_CT/jobs/evaluate.sh resnet50_baseline val` (best.pt = epoch index 4; inference with the run's config, i.e. bf16 autocast; 1,000 patient-level bootstrap resamples, seed 2026)
+- Val set: 75,840 images, 1,894 patients
+- Result:
+
+| Label | ROC AUC | 95% CI (patient bootstrap) | F1 at val-chosen threshold | Threshold |
+|---|---|---|---|---|
+| any | 0.9765 | 0.9735–0.9797 | 0.838 | 0.383 |
+| epidural | 0.9588 | **0.9421–0.9728** | **0.288** | 0.196 |
+| intraparenchymal | 0.9853 | 0.9814–0.9886 | 0.807 | 0.440 |
+| intraventricular | 0.9922 | 0.9901–0.9940 | 0.830 | 0.369 |
+| subarachnoid | 0.9680 | 0.9621–0.9731 | 0.684 | 0.247 |
+| subdural | 0.9670 | 0.9610–0.9727 | 0.705 | 0.369 |
+| **macro (5 subtypes)** | **0.9743** | **0.9703–0.9780** | **macro F1 0.663** | — |
+
+- Notes:
+  - The AUCs match the in-training validation of epoch 4 (macro 0.97426), as expected for the same checkpoint and precision.
+  - **Epidural has a high AUC but a low F1 (0.288).** At a 0.45% prevalence, even a good ranking produces many false positives per true positive at any threshold. F1 and precision-recall metrics show this; ROC AUC does not. Macro F1 is pulled down mainly by epidural.
+  - **Ties from bf16 inference:** the intraventricular and subdural thresholds are bit-identical (0.36931508779525757). With bf16 autocast, the final layer outputs bf16 logits, so the probabilities fall on a coarse grid with many ties. The effect on AUC is probably small, but evaluation should use **fp32 inference** (no ties, and comparable to the Phase 5a ONNX FP32 / INT8 numbers). To redo before the test evaluation.

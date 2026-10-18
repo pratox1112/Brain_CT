@@ -1,7 +1,9 @@
-"""Evaluation metrics: per-label ROC AUC, macro AUC, F1 at val-chosen thresholds, confusion
-matrices, and patient-level bootstrap confidence intervals.
+"""Evaluation metrics: per-label ROC AUC and average precision, F1 at val-chosen thresholds,
+confusion matrices, and patient-level bootstrap confidence intervals.
 
-Macro AUC and macro F1 average the 5 subtypes; `any` is reported separately.
+Macro values average the 5 subtypes; `any` is reported separately. Average precision (area under
+the precision-recall curve) is reported because ROC AUC hides how many false positives a rare
+class (epidural: 0.45% of images) produces.
 """
 
 from __future__ import annotations
@@ -9,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-from sklearn.metrics import precision_recall_curve, roc_auc_score
+from sklearn.metrics import average_precision_score, precision_recall_curve, roc_auc_score
 
 from brainct.data.labels import LABELS, SUBTYPES
 
@@ -24,6 +26,16 @@ def auc_per_label(y_true: np.ndarray, y_prob: np.ndarray) -> dict[str, float]:
         both_classes = 0 < column.sum() < len(column)
         aucs[label] = float(roc_auc_score(column, y_prob[:, j])) if both_classes else float("nan")
     return aucs
+
+
+def average_precision_per_label(y_true: np.ndarray, y_prob: np.ndarray) -> dict[str, float]:
+    """Average precision (precision-recall AUC) per label (NaN if a label has no positives)."""
+    precisions = {}
+    for j, label in enumerate(LABELS):
+        has_positives = y_true[:, j].sum() > 0
+        score = average_precision_score(y_true[:, j], y_prob[:, j]) if has_positives else np.nan
+        precisions[label] = float(score)
+    return precisions
 
 
 def macro(values: dict[str, float]) -> float:
@@ -96,12 +108,16 @@ def report(
 ) -> dict[str, Any]:
     """Everything evaluate.py records for one split."""
     aucs = auc_per_label(y_true, y_prob)
+    precisions = average_precision_per_label(y_true, y_prob)
     matrices = confusion(y_true, y_prob, thresholds)
     result: dict[str, Any] = {
         "images": int(len(y_true)),
         "positives": {label: int(y_true[:, j].sum()) for j, label in enumerate(LABELS)},
+        "prevalence": {label: float(y_true[:, j].mean()) for j, label in enumerate(LABELS)},
         "auc": aucs,
         "macro_auc": macro(aucs),
+        "average_precision": precisions,
+        "macro_average_precision": macro(precisions),
         "thresholds": thresholds,
         "f1": {label: matrices[label]["f1"] for label in LABELS},
         "macro_f1": macro({label: matrices[label]["f1"] for label in LABELS}),

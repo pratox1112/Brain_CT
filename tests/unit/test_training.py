@@ -20,6 +20,7 @@ from brainct.training.dataset import Augment, CacheDataset, EpochSampler
 from brainct.training.evaluate import TestAlreadyEvaluatedError, evaluate
 from brainct.training.metrics import (
     auc_per_label,
+    average_precision_per_label,
     best_f1_thresholds,
     bootstrap_auc,
     confusion,
@@ -294,8 +295,12 @@ def test_evaluate_val_then_test_once(tiny_cache):
 
     assert val["images"] == 16 and test["images"] == 16
     assert test["thresholds"] == val["thresholds"]  # chosen on val, applied to test
+    assert test["inference_precision"] == "fp32"
+    assert set(test["average_precision"]) == set(LABELS)
+    assert 0 <= test["macro_average_precision"] <= 1
+    assert (cfg.run_dir / "eval" / "predictions_val_fp32.parquet").exists()
     assert set(test["auc_ci95"]) == {*LABELS, "macro"}
-    assert (cfg.run_dir / "eval" / "predictions_test.parquet").exists()
+    assert (cfg.run_dir / "eval" / "predictions_test_fp32.parquet").exists()
     with pytest.raises(TestAlreadyEvaluatedError):
         evaluate(cfg.run_dir, "test", n_boot=20)
     evaluate(cfg.run_dir, "test", n_boot=20, force=True)
@@ -320,6 +325,19 @@ def test_auc_and_macro_on_separable_data():
     assert aucs["any"] == 0.0
     assert all(aucs[s] == 1.0 for s in SUBTYPES)
     assert macro(aucs) == 1.0
+
+
+def test_average_precision_on_separable_and_rare_data():
+    y, p = _toy_predictions()
+    assert all(v == 1.0 for v in average_precision_per_label(y, p).values())
+
+    # A rare class ranked well but not perfectly: high ROC AUC, much lower average precision.
+    y_rare = np.zeros((100, 6), dtype=np.float32)
+    y_rare[0, :] = 1
+    p_rare = np.tile(np.linspace(0, 1, 100, dtype=np.float32)[:, None], (1, 6))
+    p_rare[0, :] = 0.9  # the one positive is outranked by 10 negatives
+    assert auc_per_label(y_rare, p_rare)["epidural"] > 0.89
+    assert average_precision_per_label(y_rare, p_rare)["epidural"] < 0.2
 
 
 def test_best_f1_threshold_and_confusion():
