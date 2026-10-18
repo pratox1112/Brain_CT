@@ -437,3 +437,50 @@ Pixel format × rescale intercept (image counts):
   - The AUCs match the in-training validation of epoch 4 (macro 0.97426), as expected for the same checkpoint and precision.
   - **Epidural has a high AUC but a low F1 (0.288).** At a 0.45% prevalence, even a good ranking produces many false positives per true positive at any threshold. F1 and precision-recall metrics show this; ROC AUC does not. Macro F1 is pulled down mainly by epidural.
   - **Ties from bf16 inference:** the intraventricular and subdural thresholds are bit-identical (0.36931508779525757). With bf16 autocast, the final layer outputs bf16 logits, so the probabilities fall on a coarse grid with many ties. The effect on AUC is probably small, but evaluation should use **fp32 inference** (no ties, and comparable to the Phase 5a ONNX FP32 / INT8 numbers). To redo before the test evaluation.
+
+### Phase 3 – Final model (`resnet50_baseline`) on val, fp32 inference
+- Date: 2026-10-18
+- Decision (owner, 2026-10-18): **the 5-epoch baseline is the final model**; no Phase 4 tuning run.
+- Command: `sbatch ~/Brain_CT/jobs/evaluate.sh resnet50_baseline val` (evaluate.py now forces fp32 inference; 1,000 patient bootstrap resamples, seed 2026)
+- Val set: 75,840 images, 1,894 patients
+- Result:
+
+| Label | ROC AUC | 95% CI | Average precision | F1 | Threshold (from val) |
+|---|---|---|---|---|---|
+| any | 0.9766 | 0.9736–0.9797 | 0.906 | 0.838 | 0.380 |
+| epidural | 0.9588 | 0.9424–0.9727 | **0.220** | **0.288** | 0.184 |
+| intraparenchymal | 0.9853 | 0.9814–0.9887 | 0.877 | 0.807 | 0.448 |
+| intraventricular | 0.9922 | 0.9901–0.9940 | 0.872 | 0.830 | 0.376 |
+| subarachnoid | 0.9681 | 0.9622–0.9732 | 0.747 | 0.685 | 0.263 |
+| subdural | 0.9671 | 0.9611–0.9727 | 0.774 | 0.706 | 0.355 |
+| **macro (5 subtypes)** | **0.9743** | **0.9703–0.9780** | **0.698** | **0.663** | — |
+
+- Notes:
+  - **The tie problem is gone:** all 6 thresholds are now distinct (with bf16, IVH and SDH were bit-identical).
+  - **fp32 vs bf16 inference changes AUC very little:** macro 0.97431 vs 0.97426 (+0.00005); every label within ±0.0004.
+  - **Epidural:** average precision 0.220 against a chance level equal to its prevalence (0.45%), about 49× better than chance, yet still the clear weak point. Its F1 of 0.288 means many false alarms per true detection at the best threshold.
+  - These thresholds are the ones applied unchanged to test.
+
+### Phase 3 – **FINAL MODEL ON TEST (evaluated once)** — headline numbers
+- Date: 2026-10-18
+- Model: `resnet50_baseline` best.pt (epoch index 4), W&B run `v4x48mvs`, artifact `resnet50_baseline-model`
+- Command: `sbatch ~/Brain_CT/jobs/evaluate.sh resnet50_baseline test` (fp32 inference; **thresholds from val, unchanged**; 1,000 patient bootstrap resamples, seed 2026)
+- Test set: **76,573 images, 1,894 patients** (patient-level split, no overlap with train or val)
+- Result:
+
+| Label | ROC AUC | 95% CI | Average precision | F1 (val threshold) |
+|---|---|---|---|---|
+| any | 0.9773 | 0.9741–0.9805 | 0.911 | 0.839 |
+| epidural | 0.9715 | 0.9537–0.9838 | 0.283 | 0.327 |
+| intraparenchymal | 0.9845 | 0.9818–0.9870 | 0.866 | 0.797 |
+| intraventricular | 0.9926 | 0.9906–0.9942 | 0.897 | 0.831 |
+| subarachnoid | 0.9701 | 0.9646–0.9748 | 0.746 | 0.677 |
+| subdural | 0.9648 | 0.9576–0.9711 | 0.753 | 0.695 |
+| **macro (5 subtypes)** | **0.9767** | **0.9727–0.9801** | **0.709** | **0.665** |
+
+- Notes:
+  - The thresholds are identical to the val ones (0.380 / 0.184 / 0.448 / 0.376 / 0.263 / 0.355), confirming that nothing was tuned on test.
+  - Test vs val macro AUC: 0.9767 vs 0.9743. The intervals overlap (val 0.9703–0.9780), so the difference is within sampling noise.
+  - **Epidural** test AUC 0.9715 vs val 0.9588: its intervals are the widest (31 patients per split), so the gap is consistent with noise. Epidural remains the weak class on average precision (0.283) and F1 (0.327).
+  - **Weakest by AUC: subdural (0.965) and subarachnoid (0.970).** These are thin or diffuse bleeds that benefit from neighbouring-slice context, which this single-slice model doesn't have (a known limitation).
+  - **Resume-line numbers:** macro AUC **0.977** (95% CI 0.973–0.980) across 5 subtypes on a patient-level held-out test set of 76,573 images from 1,894 patients.
