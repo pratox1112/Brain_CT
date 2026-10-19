@@ -1,17 +1,29 @@
 name: CI
 
+# Pull requests, plus pushes to main. Not every push to every branch: that ran each PR commit
+# twice (push + pull_request) and used up free Actions minutes.
 on:
-  push:
   pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same PR cancels the run still in progress for the older one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install uv
+      - name: Install uv (with a download cache keyed on uv.lock)
         uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Install dependencies (from uv.lock)
         run: uv sync --locked
