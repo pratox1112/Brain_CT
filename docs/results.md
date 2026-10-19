@@ -620,3 +620,62 @@ Pixel format × rescale intercept (image counts):
 - **Why (most likely): per-request work outside the model dominates on this machine.** DICOM decoding and preprocessing (about 12.6 ms of CPU per request) and HTTP handling are not batched, and they share 14 logical CPUs with ONNX Runtime's 8 threads, Docker Desktop's VM and the load generator itself. Batching speeds up only the inference part (Phase 5b: 88 → 117 img/s for the model alone). Not yet measured: a server-side breakdown under load.
 - **Not a final verdict on batching:** on a dedicated server (GKE, Phase 9), with the load generator on another machine, inference is a larger share of the work and batching may help. Re-measure there.
 - **Decision (owner, 2026-10-19): micro-batching is OFF by default** (`Settings.batching = False`, Dockerfile `BRAINCT_BATCHING=false`), based on the table above. It's still switchable with `BRAINCT_BATCHING=true`. The pip/setuptools trim was not done.
+
+---
+
+## Phase 7 – Tests and CI
+
+### Phase 7 – The regression tests catch a deliberate preprocessing change
+- Date: 2026-10-19 (laptop)
+- Expectations generated with `uv run python scripts/make_regression_expected.py --synthetic --model --reason "first version (Phase 7)"`: `tests/regression/expected_synthetic.json` (4 synthetic cases, committed) and `artifacts/regression/expected_int8_samples.json` (50 sample DICOMs, real INT8 model; local only).
+- Deliberate change: brain window center 40 → **41 HU** (`src/brainct/preprocessing/window.py`), then `uv run pytest tests/regression -q`:
+  - **Both regression tests FAILED**, as intended:
+    - `test_preprocessing_matches_stored_fingerprints`: `unsigned12_intercept_m1024_512: model_input changed` (sha256 differs; mean −0.900741 → −0.902529).
+    - `test_int8_outputs_match_stored_expectations`: `ID_000aa2bce.dcm`, epidural probability 0.000811 → 0.000669 (|Δ| 1.4e-4 > tolerance 1e-5).
+  - After `git checkout -- src/brainct/preprocessing/window.py`: **both passed** again.
+- **A 1-HU shift in one window is detected by both the CI-safe synthetic test and the local real-model test.**
+
+### Phase 7 – Test suite and coverage
+- Date: 2026-10-19 (laptop, Windows, Python 3.11.17)
+- Command: `uv run pytest --cov --cov-report=term-missing`
+- Result: **420 passed** (64.9 s). **Coverage of `src/brainct`: 86%** (2,096 statements, 301 missed).
+  - **100%:** serving/app.py, serving/model.py, serving/schemas.py, serving/settings.py, preprocessing/hu.py, preprocessing/window.py, training/metrics.py, training/model.py, optimization/quantize.py, data/zip_reader.py, constants.py.
+  - Lowest: serving/loadtest.py 26% (a CLI tool, only its summary maths is tested), training/evaluate.py 72%, data/check_cache.py 73%, training/bench_loader.py 73%. The missed lines are mostly `main()` / CLI argument handling and W&B logging branches.
+  - CI's coverage is lower, because the real-data and real-model tests are skipped there (no RSNA data or model); not recorded.
+- CI (2026-10-19): both jobs green on the Phase 7 PR (lint + tests + coverage; Docker build + container smoke test with a stand-in model). Merged into main.
+
+---
+
+## Phase 8 – Deployment
+
+### Phase 8 – Local Kubernetes rehearsal (Docker Desktop, free)
+- Date: 2026-10-19
+- Cluster: Docker Desktop Kubernetes v1.30.5 (one node, `docker-desktop`), on the laptop
+- Chart: `infra/helm/brainct` with `infra/helm/values-local.yaml`: 2 replicas, each 2 CPU (request = limit), 1–2 GiB, `BRAINCT_THREADS=2`, batching off, LoadBalancer on localhost:8080, HPA off (no metrics-server, by the owner's choice). Image `brainct-api:0.1.0` (553 MB).
+- Commands: `helm lint` / `helm template` OK → `helm install brainct infra/helm/brainct -f infra/helm/values-local.yaml`
+- Result:
+  - **Both pods Running and Ready (1/1) within 12 s** of install. `/ready` through the Service: ready, model version ef6cea9f5cb4, batching off.
+  - Load test through the Kubernetes Service (`uv run python -m brainct.serving.loadtest --url http://localhost:8080 --concurrency 1 8 --requests 100 --label k8s_local`), 0 errors:
+
+| Concurrent clients | p50 (ms) | p95 (ms) | Requests/s |
+|---|---|---|---|
+| 1 | 32.8 | 87.3 | 22.9 |
+| 8 | 216.2 | 412.4 | 31.9 |
+
+  - **Self-healing:** after `kubectl delete pod brainct-6765b797dc-4b6mc`, Kubernetes created a replacement (`brainct-6765b797dc-b4hhh`) that was **Running and Ready within 5 s**, while the other pod kept serving.
+- Notes:
+  - Slower than the single `docker run` container (Phase 6: 1 client p50 23.9 ms, about 68 req/s maximum). Here each pod has **2 CPUs and 2 ONNX Runtime threads** (4 CPUs in total across 2 pods), against **8 threads** in one container. Docker Desktop's load-balancer path also adds a hop. The load generator again shared the laptop's CPU.
+  - This run checks the mechanism (probes, Service, self-healing), not performance. Performance gets measured on GKE in Phase 9.
+
+### Phase 8 – GKE Autopilot deployment, session 1 (2026-10-19)
+- Infrastructure: `terraform -chdir=infra/terraform apply` → Autopilot cluster `brainct` + Artifact Registry repo `brainct` in **us-east1** (project in a GCP free-trial account). Helm: `helm install brainct infra/helm/brainct -f infra/helm/values-gke.yaml --set image.repository=<registry path>` (1–4 pods via the HPA, each 2 vCPU / 2 GiB, batching off, LoadBalancer on port 80).
+- Image in Artifact Registry: **143,045,202 bytes compressed** (553 MB uncompressed locally).
+- **Issue found: `ErrImagePull` / `ImagePullBackOff` with `403 Forbidden`** when the node fetched a registry token. Cause: the nodes' service account (the Compute Engine default SA) had **no read permission on Artifact Registry**; newer projects don't grant that account broad roles automatically. **Fix:** `roles/artifactregistry.reader` on the `brainct` repository for `<project-number>-compute@developer.gserviceaccount.com`, applied with `gcloud` during the session. Must be added to Terraform so new clusters work.
+- After the fix: **the pod went from created to Ready (1/1) in 23 s** (about 10 s image pull and start, then model load and warmup).
+- Node: `gk3-brainct-nap-...` (Container-Optimized OS, amd64, kubelet v1.36.4-gke.1495002), created by Autopilot when the pod was scheduled. A second node (created during the pull retries) was being removed (`NotReady,SchedulingDisabled`). Machine type not recorded.
+- **Public endpoint:** `/ready` from the laptop over the internet → ready, model version ef6cea9f5cb4, batching off.
+- HPA: `cpu: 0%/70%`, 1 replica (min 1 / max 4). **Metrics are available on GKE**, unlike the local cluster.
+- Smoke load test from the laptop over the internet (`--concurrency 1 --requests 50 --label gke_smoke`): **p50 116.3 ms, p95 168.3 ms, 8.1 req/s, 0 errors**, all batch size 1.
+  - Much slower than local (23.9 ms) **because each request uploads a ~0.5 MB DICOM from the laptop's home internet connection to us-east1**: upload bandwidth and round-trip time dominate. The server-side `timing` in each response (not captured in this run) separates server time from network time. Phase 9 should measure from a machine close to the cluster.
+- **Teardown:** `helm uninstall brainct`, then `terraform -chdir=infra/terraform destroy` → **"Destroy complete! Resources: 4 destroyed."** Cluster deletion took **5 min 55 s**. The two `google_project_service` entries were removed from state, but the APIs stay enabled (`disable_on_destroy = false`; no cost). `kubectl` was switched back to `docker-desktop`.
+- Session cost: to read from Billing → Reports (charges appear with a delay). **Not yet recorded.**
