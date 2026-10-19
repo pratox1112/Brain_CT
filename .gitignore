@@ -15,3 +15,9 @@ __pycache__/
 /samples/
 /samples_edge/
 /wandb/
+
+# CI smoke-test leftovers
+/smoke.dcm
+/predict.json
+/coverage.xml
+.coverage

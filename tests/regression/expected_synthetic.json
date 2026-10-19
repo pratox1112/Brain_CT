@@ -1,0 +1,130 @@
+{
+  "generated_at": "2026-10-19T15:01:03",
+  "reason": "first version (Phase 7)",
+  "cases": {
+    "unsigned12_intercept_m1024_512": {
+      "hu": {
+        "dtype": "int16",
+        "shape": [
+          256,
+          256
+        ],
+        "sha256": "b1e9e073b05898ee44bbc4ac25888b9124e67adf6213d9be43914f40b9081fac",
+        "min": -960.0,
+        "max": 742.0,
+        "mean": -125.764679
+      },
+      "model_input": {
+        "dtype": "float32",
+        "shape": [
+          3,
+          256,
+          256
+        ],
+        "sha256": "2ae7b6cec5452d53bb8453b732c99ff9a1e2522be3e4cab84969d98d388d05ba",
+        "min": -2.1179039478302,
+        "max": 2.4285714626312256,
+        "mean": -0.900741
+      },
+      "sign_fixed": false,
+      "padded": false,
+      "original_shape": [
+        512,
+        512
+      ]
+    },
+    "unsigned12_intercept_0_signfix": {
+      "hu": {
+        "dtype": "int16",
+        "shape": [
+          256,
+          256
+        ],
+        "sha256": "ef5fc7fae4238e1762546a240b6a75b4232cea232fdb075c465eb775750e50de",
+        "min": -1000.0,
+        "max": 72.0,
+        "mean": -480.870102
+      },
+      "model_input": {
+        "dtype": "float32",
+        "shape": [
+          3,
+          256,
+          256
+        ],
+        "sha256": "a0ca80f57f3a098a9f440bcdf68f8d09a0aad88b3f08995066e3a005cf4cba76",
+        "min": -2.1179039478302,
+        "max": 1.8122268915176392,
+        "mean": -1.738783
+      },
+      "sign_fixed": true,
+      "padded": false,
+      "original_shape": [
+        512,
+        512
+      ]
+    },
+    "signed16_intercept_0_nonsquare_padding": {
+      "hu": {
+        "dtype": "int16",
+        "shape": [
+          256,
+          256
+        ],
+        "sha256": "db8b7ed281d8addadbe45c1dc202b693edd002e023590b53ab9ae98f9ead170f",
+        "min": -1024.0,
+        "max": 1395.0,
+        "mean": -125.977539
+      },
+      "model_input": {
+        "dtype": "float32",
+        "shape": [
+          3,
+          256,
+          256
+        ],
+        "sha256": "e0105d442769f816ff35a639ecb445a7304833021b5dd5dda639b8f71746e79e",
+        "min": -2.1179039478302,
+        "max": 2.4285714626312256,
+        "mean": -0.080013
+      },
+      "sign_fixed": false,
+      "padded": true,
+      "original_shape": [
+        490,
+        638
+      ]
+    },
+    "signed12_intercept_0_already_hu": {
+      "hu": {
+        "dtype": "int16",
+        "shape": [
+          256,
+          256
+        ],
+        "sha256": "7f2df70fcaae324e70185acb47d0b92f6f09f11e6f6c8eaae522eb74a7e10a21",
+        "min": -938.0,
+        "max": 1388.0,
+        "mean": 252.354279
+      },
+      "model_input": {
+        "dtype": "float32",
+        "shape": [
+          3,
+          256,
+          256
+        ],
+        "sha256": "599b637cd81e5e1d05c1737d372a5d6fde069d0cfaa28b1e50d87af31d129b3d",
+        "min": -2.1179039478302,
+        "max": 2.4285714626312256,
+        "mean": 0.61942
+      },
+      "sign_fixed": false,
+      "padded": false,
+      "original_shape": [
+        512,
+        512
+      ]
+    }
+  }
+}
