@@ -1,0 +1,13 @@
+BrainCT API deployed as "{{ include "brainct.fullname" . }}" (research use only).
+
+Pods:      kubectl get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+Service:   kubectl get service {{ include "brainct.fullname" . }}
+{{- if eq .Values.service.type "LoadBalancer" }}
+URL:       http://<EXTERNAL-IP>:{{ .Values.service.port }}  (EXTERNAL-IP from the service; localhost on Docker Desktop)
+{{- else }}
+URL:       kubectl port-forward service/{{ include "brainct.fullname" . }} 8080:{{ .Values.service.port }}
+           then http://127.0.0.1:8080
+{{- end }}
+{{- if .Values.autoscaling.enabled }}
+Autoscaler: kubectl get hpa {{ include "brainct.fullname" . }}
+{{- end }}

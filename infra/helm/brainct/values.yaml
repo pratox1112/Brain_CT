@@ -1,0 +1,72 @@
+# Defaults for the brainct chart. Environment files (values-local.yaml, values-gke.yaml)
+# override what differs between Docker Desktop and GKE.
+
+image:
+  repository: brainct-api
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+service:
+  type: ClusterIP
+  port: 8000
+
+# Each pod gets 2 dedicated CPUs, and ONNX Runtime uses exactly that many threads
+# (BRAINCT_THREADS below) so pods don't oversubscribe their CPU allowance.
+# On GKE Autopilot, billing follows these *requests*.
+resources:
+  requests:
+    cpu: "2"
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+env:
+  BRAINCT_THREADS: "2"
+  BRAINCT_BATCHING: "false"  # measured: no gain on one machine (results.md, Phase 6)
+  BRAINCT_WARMUP: "true"
+
+# Kubernetes uses these endpoints from the app:
+#   startup:   /health  - give the process time to start (model load + warmup)
+#   liveness:  /health  - restart the container if the process stops responding
+#   readiness: /ready   - only send traffic once the model is loaded
+probes:
+  startup:
+    path: /health
+    periodSeconds: 2
+    failureThreshold: 30   # up to 60 s to start
+  liveness:
+    path: /health
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    path: /ready
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# Horizontal Pod Autoscaler on CPU. Needs a metrics server (built into GKE; not installed on
+# the local Docker Desktop cluster, so values-local.yaml turns it off).
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true   # /tmp is a writable emptyDir (multipart upload spooling)
+  capabilities:
+    drop: ["ALL"]
+
+terminationGracePeriodSeconds: 30

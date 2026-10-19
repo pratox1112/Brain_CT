@@ -1,0 +1,32 @@
+# GKE Autopilot (us-east1). The image path comes from Terraform at install time, so the
+# project ID is not stored in git:
+#   $repo = terraform -chdir=infra/terraform output -raw image_repository
+#   helm install brainct infra/helm/brainct -f infra/helm/values-gke.yaml --set image.repository=$repo
+
+image:
+  repository: SET-AT-INSTALL   # --set image.repository=<terraform output image_repository>
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+# Autopilot bills per pod request and expects limits equal to requests; it also needs at least
+# about 1 GiB of memory per vCPU, so 2 vCPU gets 2 GiB.
+resources:
+  requests:
+    cpu: "2"
+    memory: 2Gi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+# A public IP from Google's load balancer, on port 80.
+service:
+  type: LoadBalancer
+  port: 80
+
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70

@@ -21,3 +21,11 @@ __pycache__/
 /predict.json
 /coverage.xml
 .coverage
+
+# Terraform: local state, plugins and per-person settings
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+infra/terraform/terraform.tfvars
