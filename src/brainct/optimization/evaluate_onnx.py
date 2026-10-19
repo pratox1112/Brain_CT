@@ -44,6 +44,7 @@ from brainct.optimization.export_onnx import (
 )
 from brainct.optimization.quantize import (
     CALIBRATION_METHODS,
+    DEFAULT_METHODS,
     CacheCalibrationReader,
     quantize_int8,
 )
@@ -95,7 +96,7 @@ def _summary(metrics: dict[str, Any]) -> dict[str, Any]:
 def run(
     run_dir: str | Path,
     out_dir: str | Path,
-    methods: tuple[str, ...] = tuple(CALIBRATION_METHODS),
+    methods: tuple[str, ...] = DEFAULT_METHODS,
     n_calibration: int = 512,
     n_verify: int = 512,
     batch_size: int = 64,
@@ -197,7 +198,7 @@ def main(argv: list[str] | None = None) -> None:
         "--methods",
         nargs="+",
         choices=list(CALIBRATION_METHODS),
-        default=list(CALIBRATION_METHODS),
+        default=list(DEFAULT_METHODS),
     )
     parser.add_argument("--n-calibration", type=int, default=512)
     parser.add_argument("--n-verify", type=int, default=512)

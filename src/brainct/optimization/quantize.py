@@ -27,6 +27,9 @@ CALIBRATION_METHODS = {
     "percentile": CalibrationMethod.Percentile,
     "entropy": CalibrationMethod.Entropy,
 }
+# Compared by default. Entropy is left out: with our settings and this ONNX Runtime version it
+# produced a model bit-identical to minmax (same md5, 2026-10-19), so it added no comparison.
+DEFAULT_METHODS = ("minmax", "percentile")
 
 
 class CacheCalibrationReader(CalibrationDataReader):
