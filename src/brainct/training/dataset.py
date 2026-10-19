@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -123,16 +124,21 @@ class CacheDataset(Dataset):
         self._cache_path = cache_dir / CACHE_FILE
         self._offset, self._row_shape = _npy_layout(self._cache_path)
         self._row_bytes = int(np.prod(self._row_shape)) * np.dtype(np.int16).itemsize
-        # Opened lazily, once per DataLoader worker process (handles can't be shared across forks).
+        # Opened lazily, once per process. A file handle inherited through fork() shares its file
+        # offset with the parent and every other worker, so concurrent seek+read pairs race and
+        # return the wrong rows (this corrupted the first Phase 5a val numbers, 2026-10-18).
+        # read_row therefore reopens the file in any new process, and reads with os.preadv,
+        # which takes an explicit position and never uses the shared offset.
         self._memmap: np.ndarray | None = None
         self._file = None
+        self._file_pid: int | None = None
 
     def __len__(self) -> int:
         return len(self.rows)
 
     def __getstate__(self) -> dict:
         state = self.__dict__.copy()
-        state["_memmap"], state["_file"] = None, None  # reopened in each worker
+        state["_memmap"], state["_file"], state["_file_pid"] = None, None, None  # reopened
         return state
 
     def read_row(self, row: int) -> np.ndarray:
@@ -141,12 +147,23 @@ class CacheDataset(Dataset):
             if self._memmap is None:
                 self._memmap = np.load(self._cache_path, mmap_mode="r")
             return np.array(self._memmap[row])
-        if self._file is None:
-            self._file = open(self._cache_path, "rb", buffering=0)  # kept open for the worker
+        if self._file is None or self._file_pid != os.getpid():
+            self._file = open(self._cache_path, "rb", buffering=0)  # kept open for this process
+            self._file_pid = os.getpid()
         hu = np.empty(self._row_shape, dtype=np.int16)
-        self._file.seek(self._offset + row * self._row_bytes)
-        if self._file.readinto(memoryview(hu).cast("B")) != self._row_bytes:
-            raise OSError(f"short read for cache row {row}")
+        buffer = memoryview(hu).cast("B")
+        position = self._offset + row * self._row_bytes
+        if hasattr(os, "preadv"):  # Linux / macOS: positional read, no shared file offset
+            done = 0
+            while done < self._row_bytes:
+                n = os.preadv(self._file.fileno(), [buffer[done:]], position + done)
+                if n == 0:
+                    raise OSError(f"short read for cache row {row}")
+                done += n
+        else:  # Windows: workers are spawned, not forked, so this handle is never shared
+            self._file.seek(position)
+            if self._file.readinto(buffer) != self._row_bytes:
+                raise OSError(f"short read for cache row {row}")
         return hu
 
     def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor, int]:

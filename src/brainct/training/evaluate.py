@@ -49,7 +49,7 @@ class TestAlreadyEvaluatedError(RuntimeError):
     __test__ = False  # not a pytest test class, despite the name
 
 
-def _load_run(run_dir: Path, overrides: list[str]) -> tuple[TrainConfig, torch.nn.Module, Path]:
+def load_run(run_dir: Path, overrides: list[str]) -> tuple[TrainConfig, torch.nn.Module, Path]:
     saved = yaml.safe_load((run_dir / "config.yaml").read_text())
     extra = [f"{k}={json.dumps(v)}" for k, v in saved.items()]
     cfg = load_config(None, extra + overrides)
@@ -101,7 +101,7 @@ def evaluate(
             "only if you understand that re-running invalidates it as an unbiased estimate)"
         )
 
-    cfg, model, weights = _load_run(run_dir, overrides or [])
+    cfg, model, weights = load_run(run_dir, overrides or [])
     cfg.amp = False  # INFERENCE_PRECISION: no autocast during evaluation
     use_cuda = cfg.device == "cuda" and torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")

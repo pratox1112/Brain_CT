@@ -484,3 +484,59 @@ Pixel format × rescale intercept (image counts):
   - **Epidural** test AUC 0.9715 vs val 0.9588: its intervals are the widest (31 patients per split), so the gap is consistent with noise. Epidural remains the weak class on average precision (0.283) and F1 (0.327).
   - **Weakest by AUC: subdural (0.965) and subarachnoid (0.970).** These are thin or diffuse bleeds that benefit from neighbouring-slice context, which this single-slice model doesn't have (a known limitation).
   - **Resume-line numbers:** macro AUC **0.977** (95% CI 0.973–0.980) across 5 subtypes on a patient-level held-out test set of 76,573 images from 1,894 patients.
+
+---
+
+## Phase 5a – ONNX export and INT8 quantization
+
+### Phase 5a – First run (2026-10-18): export valid, but the val calibration numbers are corrupted (bug found)
+- Run: `sbatch ~/Brain_CT/jobs/optimize.sh` on node d0110, **Intel Xeon Platinum 8276 (has avx512_vnni)**, `short` partition, 32 CPUs (24 ORT threads + 8 loader workers). Elapsed 1,843 s.
+- **Export (valid):** TorchScript exporter, opset 17. Parity with PyTorch FP32 on 512 val images: **max abs logit diff 8.6e-5, mean 3.1e-6.**
+- **File sizes (valid):** ONNX FP32 **93,999,552 B**; ONNX INT8 (entropy) **24,028,028 B** (**−74.4%**, 3.9× smaller).
+- **Test comparison at val thresholds (valid, see below why):**
+
+| Format | Test macro AUC | Δ vs PyTorch FP32 |
+|---|---|---|
+| PyTorch FP32 | 0.97669 | — |
+| ONNX FP32 | 0.97669 | −0.000002 |
+| ONNX INT8 (entropy) | 0.97539 | **−0.00130** |
+
+  - INT8 ΔAUC by label: any −0.0018, epidural −0.0001, intraparenchymal −0.0015, intraventricular −0.0007, subarachnoid −0.0020, subdural −0.0021.
+  - Decision flips vs PyTorch FP32 (out of 76,573): **ONNX FP32: 0–7 per label (≤ 0.009%)**; **ONNX INT8: 69 (epidural, 0.09%) to 603 (any, 0.79%)**.
+- **BUG: the val macro AUC per calibration method is wrong** (minmax 0.746, percentile 0.800, entropy 0.900). The same entropy INT8 model scored **0.975 on test**, which is impossible for a real difference that size.
+  - **Cause:** the pipeline read val images in the main process (parity check, image size), which opened the dataset's file handle there. The DataLoader then **forked** its 8 workers, which **inherited that same open file description and its shared file offset**. Concurrent `seek` + `readinto` from several processes raced, so workers read the wrong rows and the val predictions were partly garbage.
+  - **Test predictions are not affected:** the test dataset was never read in the main process, so each worker opened its own handle.
+  - **Training / evaluate / bench_loader / cache are not affected:** none of them read dataset rows in the main process before starting DataLoader workers.
+  - **Consequence:** the calibration method choice (entropy) was made on corrupted val numbers. It must be redone after the fix.
+
+### Phase 5a – Second run, after the fork-safety fix (2026-10-19)
+- Run: `sbatch ~/Brain_CT/jobs/optimize.sh` on node d0150, **AMD EPYC 7702 (Zen 2), no VNNI instructions**, 32 CPUs (24 ORT threads + 8 workers). Elapsed **5,010 s** (vs 1,843 s on the Xeon in run 1).
+- Export parity (512 val images): max abs logit diff 9.7e-5, mean 3.1e-6 (same as run 1).
+- **Val macro AUC per calibration method (now valid):** minmax 0.96648 · **percentile 0.96768 (chosen)** · entropy 0.96648. PyTorch FP32 val macro AUC = 0.97431.
+  - minmax and entropy are identical to 16 digits. Unexpected: to be verified by comparing the two INT8 files' hashes.
+- File sizes: ONNX FP32 93,999,552 B; INT8 (percentile) 24,028,032 B.
+- Test, at the val thresholds:
+
+| Format | Test macro AUC | Δ vs PyTorch FP32 |
+|---|---|---|
+| PyTorch FP32 | 0.97669 | — |
+| ONNX FP32 | 0.97669 | −0.000002 |
+| ONNX INT8 (percentile), **on AMD EPYC without VNNI** | 0.96937 | **−0.00732** |
+
+  - INT8 ΔAUC by label: any −0.0074, **epidural −0.0156**, intraparenchymal −0.0016, intraventricular −0.0004, subarachnoid −0.0045, **subdural −0.0145**.
+  - INT8 decision flips: any 2.8%, **subdural 4.3%**, subarachnoid 1.0%, intraparenchymal 0.5%, epidural 0.4%, intraventricular 0.2%.
+- **Findings:**
+  - **The bug is fixed:** val and test now agree (INT8 val −0.0066, test −0.0073 relative to PyTorch).
+  - **INT8 accuracy depends on the CPU.** Run 1 on a Xeon **with** VNNI: entropy INT8 lost **0.0013** test macro AUC (valid, unaffected by the bug). Run 2 on an AMD EPYC **without** VNNI: the best INT8 lost **0.0073**. This matches a known ONNX Runtime behaviour: u8s8 INT8 on AVX2 CPUs without VNNI can saturate intermediate int16 sums. ORT recommends `reduce_range=True` (7-bit weights) or u8u8 there.
+  - Against the pre-agreed bar (≤ 0.005 macro, ≤ 0.01 per subtype), run 2 **fails** (macro 0.0073; epidural 0.0156; subdural 0.0145) and run 1 **passes**.
+  - The laptop (Intel Core Ultra 7 155U) supports AVX-VNNI, so serving there should behave like run 1. This needs measuring on the deployment CPU, not assuming.
+- **Correction (2026-10-19): entropy calibration produced a file bit-identical to minmax** (`md5sum`: int8_entropy.onnx = int8_minmax.onnx = 5f79d227…; int8_percentile.onnx differs). So in this ONNX Runtime version, our "entropy" setting effectively gave the minmax model. **Run 1's "INT8 (entropy)" result, −0.0013 test macro AUC on the VNNI Xeon, is therefore effectively the minmax model.** The number stands; the label doesn't. The cause (ORT fallback vs a missing option) is not yet known.
+
+### Phase 5a – Decision and final INT8 model (2026-10-19)
+- **Owner's decision: minimal option.** No further cluster INT8 jobs. No `reduce_range` variant for now (revisit in Phase 8 if the cloud CPUs lack VNNI).
+- **Final INT8 model: `model_int8.onnx` = percentile calibration**, chosen on valid val numbers (run 2: percentile 0.96768 vs minmax 0.96648).
+- Entropy is dropped from the default comparison (it was bit-identical to minmax).
+- Final Phase 5a numbers, with their hardware:
+  - ONNX FP32: test macro AUC 0.97669 (Δ −0.000002 vs PyTorch); ≤ 7 decision flips per label out of 76,573; 94.0 MB.
+  - INT8: 24.0 MB (3.9× smaller). **Accuracy is CPU-dependent:** test macro AUC Δ **−0.0073** for percentile on AMD EPYC 7702 (no VNNI, run 2), and Δ **−0.0013** for minmax (labelled "entropy") on Xeon Platinum 8276 (VNNI, run 1). **Percentile on a VNNI CPU was not measured on the full test set.**
+  - The serving laptop (Core Ultra 7 155U) has AVX-VNNI. In Phase 5b, check INT8 vs PyTorch **agreement** on the laptop sample DICOMs (a sanity check, not a selection), alongside latency.
