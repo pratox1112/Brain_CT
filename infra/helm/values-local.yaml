@@ -1,0 +1,20 @@
+# Docker Desktop's built-in Kubernetes on the laptop (free practice run).
+#   docker build -f serving/Dockerfile -t brainct-api:0.1.0 .
+#   helm install brainct infra/helm/brainct -f infra/helm/values-local.yaml
+#   -> http://localhost:8080/docs
+
+image:
+  repository: brainct-api   # the locally built image; Docker Desktop's cluster can use it directly
+  tag: "0.1.0"
+  pullPolicy: Never          # never try to download it from a registry
+
+replicaCount: 2
+
+# Docker Desktop exposes LoadBalancer services on localhost.
+service:
+  type: LoadBalancer
+  port: 8080
+
+# No metrics server on Docker Desktop, so the autoscaler would only show <unknown>.
+autoscaling:
+  enabled: false

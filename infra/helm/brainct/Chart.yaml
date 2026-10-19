@@ -1,0 +1,6 @@
+apiVersion: v2
+name: brainct
+description: BrainCT hemorrhage-detection API (ONNX INT8 on CPU). Research use only - not for clinical decisions.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
