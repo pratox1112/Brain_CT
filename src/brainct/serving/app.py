@@ -10,6 +10,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
+import numpy as np
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
@@ -24,6 +25,7 @@ from prometheus_client import (
 
 from brainct.constants import DISCLAIMER, LABELS
 from brainct.preprocessing.dicom import DicomError
+from brainct.serving.batching import MicroBatcher
 from brainct.serving.model import InferenceModel
 from brainct.serving.schemas import (
     ErrorResponse,
@@ -70,8 +72,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         registry=registry,
     )
     model_loaded = Gauge("brainct_model_loaded", "1 if the model is loaded", registry=registry)
+    batch_sizes = Histogram(
+        "brainct_batch_size",
+        "Images per model call",
+        buckets=(1, 2, 4, 8, 16, 32),
+        registry=registry,
+    )
 
-    state: dict[str, Any] = {"model": None, "error": None}
+    state: dict[str, Any] = {"model": None, "error": None, "batcher": None}
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -81,11 +89,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             state["model"] = InferenceModel(
                 settings.model_path, settings.thresholds_path, settings.model_name, settings.threads
             )
+            if settings.warmup:
+                # The first ONNX Runtime call allocates memory and is slow (27 ms vs ~11 ms
+                # measured on the laptop); do it now, not on a user's request.
+                size = state["model"].image_size
+                state["model"].predict_batch(np.zeros((1, 3, size, size), dtype=np.float32))
             model_loaded.set(1)
         except Exception as exc:  # any load failure is reported via /ready
+            state["model"] = None
             state["error"] = f"{type(exc).__name__}: {exc}"
             model_loaded.set(0)
+        if state["model"] is not None and settings.batching:
+            state["batcher"] = MicroBatcher(
+                state["model"].predict_batch,
+                settings.max_batch,
+                settings.max_wait_ms,
+                on_batch=batch_sizes.observe,
+            )
+            await state["batcher"].start()
         yield
+        if state["batcher"] is not None:
+            await state["batcher"].stop()
 
     app = FastAPI(
         title="BrainCT hemorrhage detection (research use only)",
@@ -118,7 +142,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         model: InferenceModel | None = state["model"]
         if model is None:
             raise HTTPException(503, f"model not loaded: {state['error']}")
-        return {"status": "ready", "model": model.name, "version": model.version}
+        batching = "on" if state["batcher"] is not None else "off"
+        return {
+            "status": "ready",
+            "model": model.name,
+            "version": model.version,
+            "batching": batching,
+        }
 
     @app.get("/metrics")
     async def metrics() -> Response:
@@ -146,7 +176,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(422, f"expected a CT image, got Modality={prepared.info.modality}")
 
         inference_start = time.perf_counter()
-        probs = (await run_in_threadpool(model.predict_batch, prepared.x[None]))[0]
+        batcher: MicroBatcher | None = state["batcher"]
+        if batcher is not None:
+            probs, batch_size = await batcher.predict(prepared.x)
+        else:
+            probs = (await run_in_threadpool(model.predict_batch, prepared.x[None]))[0]
+            batch_size = 1
+            batch_sizes.observe(1)
+        # With batching this includes the wait for the batch to fill (at most max_wait_ms).
         inference_ms = (time.perf_counter() - inference_start) * 1000
         stage_latency.labels("preprocess").observe(prepared.preprocess_ms / 1000)
         stage_latency.labels("inference").observe(inference_ms / 1000)
@@ -171,6 +208,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 preprocess_ms=prepared.preprocess_ms,
                 inference_ms=inference_ms,
                 total_ms=(time.perf_counter() - start) * 1000,
+                batch_size=batch_size,
             ),
         )
 

@@ -586,3 +586,37 @@ Pixel format × rescale intercept (image counts):
 
 - **Percentile agrees with PyTorch better than minmax on this laptop too** (smaller differences and fewer flips: 18 vs 33 in total), consistent with the val-based choice.
 - The sample set is small and hemorrhage-enriched, so these flip rates (0.3–2% per label) aren't comparable to the full-test flip rates.
+
+---
+
+## Phase 6 – Serving API (FastAPI + Docker, laptop)
+
+### Phase 6 – Docker image
+- Date: 2026-10-19
+- Image: `brainct-api:0.1.0` (`serving/Dockerfile`; base `python:3.11.11-slim-bookworm`; dependencies = base + [serve] from `serving/requirements.txt`, exported from uv.lock; **no PyTorch**)
+- Command: `docker build -f serving/Dockerfile -t brainct-api:0.1.0 .`, then `docker images brainct-api:0.1.0`
+- **Size reported by `docker images`: 553 MB.** Layers (`docker history`): Python packages (`/opt/venv`) 235 MB · INT8 model 24 MB · libgomp1 3.9 MB · thresholds 16 kB · the rest is the Python slim base image.
+- Largest packages: onnxruntime 68 MB, numpy 45 MB + numpy.libs 28 MB, pillow.libs 14 MB + PIL 7.1 MB, pydicom 15 MB, pip 17 MB, setuptools 6.7 MB, pydantic_core 5.1 MB, pydantic 4.3 MB.
+- Serving uses numpy 2.4.6, pillow 12.3.0 and pydicom 3.0.2, the same versions as the laptop and cluster, which gave bit-identical preprocessing in Phase 2.
+- pip + setuptools + pkg_resources (about 26 MB) are only needed to install packages; they could be removed from the runtime image.
+
+### Phase 6 – End-to-end load test through the API, micro-batching on vs off
+- Date: 2026-10-19
+- Setup: container on the laptop (Core Ultra 7 155U, Docker Desktop), `BRAINCT_THREADS=8`; batching max_batch 8 / max_wait 5 ms; warmup on. **The load generator (`brainct.serving.loadtest`, async httpx) ran on the same laptop**, so it shares the CPU with the server.
+- Requests: real sample DICOMs (`samples/dicom`); 20 warmup requests, then 300 per concurrency level. Latency is client-side, end to end (HTTP upload + DICOM preprocessing + inference + JSON). 0 errors in every run.
+- Commands: `docker run --rm -d -p 8000:8000 --name brainct [-e BRAINCT_BATCHING=false] brainct-api:0.1.0`, then `uv run python -m brainct.serving.loadtest --label batching_{on,off}`
+
+| Concurrent clients | Batching | p50 (ms) | p95 (ms) | Requests/s | Batch sizes used |
+|---|---|---|---|---|---|
+| 1 | off | **23.9** | **38.6** | 39.5 | all 1 |
+| 1 | on | 28.9 | 40.0 | 33.1 | all 1 |
+| 8 | off | 118.4 | 165.9 | 67.0 | all 1 |
+| 8 | on | 120.3 | 179.0 | 62.9 | mostly 3–5; 40 of 300 requests in batches of 8 |
+| 32 | off | 463.0 | 544.5 | 67.8 | all 1 |
+| 32 | on | 452.9 | 580.8 | 68.5 | mostly 2–3 and 8 |
+
+- **Single-request latency through the API (batching off, 1 client): p50 23.9 ms, p95 38.6 ms.** That's consistent with Phase 5b (INT8 model alone: p50 11.1 / p95 12.6 ms) plus preprocessing (about 12.6 ms, from the server's timing field) plus HTTP overhead.
+- **Micro-batching gave no throughput gain here:** the maximum was about 68 req/s either way (32 clients: 68.5 on vs 67.8 off), and it added about 5 ms of p50 latency at 1 client, which is the 5 ms wait window.
+- **Why (most likely): per-request work outside the model dominates on this machine.** DICOM decoding and preprocessing (about 12.6 ms of CPU per request) and HTTP handling are not batched, and they share 14 logical CPUs with ONNX Runtime's 8 threads, Docker Desktop's VM and the load generator itself. Batching speeds up only the inference part (Phase 5b: 88 → 117 img/s for the model alone). Not yet measured: a server-side breakdown under load.
+- **Not a final verdict on batching:** on a dedicated server (GKE, Phase 9), with the load generator on another machine, inference is a larger share of the work and batching may help. Re-measure there.
+- **Decision (owner, 2026-10-19): micro-batching is OFF by default** (`Settings.batching = False`, Dockerfile `BRAINCT_BATCHING=false`), based on the table above. It's still switchable with `BRAINCT_BATCHING=true`. The pip/setuptools trim was not done.

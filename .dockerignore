@@ -1,0 +1,10 @@
+# Build context = repo root. Send only what the image needs: never data, samples or weights.
+*
+!pyproject.toml
+!README.md
+!src/
+!serving/requirements.txt
+!artifacts/resnet50_baseline/onnx/model_int8.onnx
+!artifacts/resnet50_baseline/metrics_val.json
+**/__pycache__
+**/*.pyc
