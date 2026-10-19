@@ -540,3 +540,49 @@ Pixel format × rescale intercept (image counts):
   - ONNX FP32: test macro AUC 0.97669 (Δ −0.000002 vs PyTorch); ≤ 7 decision flips per label out of 76,573; 94.0 MB.
   - INT8: 24.0 MB (3.9× smaller). **Accuracy is CPU-dependent:** test macro AUC Δ **−0.0073** for percentile on AMD EPYC 7702 (no VNNI, run 2), and Δ **−0.0013** for minmax (labelled "entropy") on Xeon Platinum 8276 (VNNI, run 1). **Percentile on a VNNI CPU was not measured on the full test set.**
   - The serving laptop (Core Ultra 7 155U) has AVX-VNNI. In Phase 5b, check INT8 vs PyTorch **agreement** on the laptop sample DICOMs (a sanity check, not a selection), alongside latency.
+
+---
+
+## Phase 5b – Latency and throughput benchmark (laptop CPU)
+
+### Phase 5b – Model-only latency: PyTorch FP32 vs ONNX Runtime FP32 vs INT8
+- Date: 2026-10-19
+- Hardware: **laptop, Intel Core Ultra 7 155U** (14 logical CPUs, AVX-VNNI capable; the script can't read CPU flags on Windows). Plugged in, "Best performance" power mode, heavy apps closed.
+- Settings: **8 threads** for PyTorch and ONNX Runtime alike; input = fixed random float32 tensors of shape (N, 3, 256, 256), so preprocessing isn't timed; 10 warmup runs; 100 / 50 / 25 timed runs at batch 1 / 8 / 32; **3 repeats, medians reported**.
+- Command: `uv run python -m brainct.optimization.benchmark` (code on branch `latency-benchmark`); full output in `artifacts/benchmark/benchmark.json` (local)
+- Models: `artifacts/resnet50_baseline/` → best.pt, onnx/model_fp32.onnx, onnx/model_int8.onnx (percentile, final), onnx/int8_minmax.onnx
+
+| Version | Batch | p50 (ms) | p95 (ms) | Throughput (img/s) | Test macro AUC |
+|---|---|---|---|---|---|
+| PyTorch FP32 | 1 | 56.7 | **61.7** | 17.5 | 0.9767 |
+| PyTorch FP32 | 8 | 447.5 | 495.7 | 17.7 | |
+| PyTorch FP32 | 32 | 1,959.6 | 2,423.6 | 15.9 | |
+| ONNX Runtime FP32 | 1 | 28.8 | 34.4 | 33.7 | 0.9767 |
+| ONNX Runtime FP32 | 8 | 243.8 | 256.6 | 32.4 | |
+| ONNX Runtime FP32 | 32 | 1,001.3 | 1,114.5 | 32.0 | |
+| **ONNX Runtime INT8 (percentile, final)** | 1 | **11.1** | **12.6** | 87.6 | 0.9694–0.9754* |
+| ONNX Runtime INT8 (percentile, final) | 8 | 69.8 | 72.5 | 114.4 | |
+| ONNX Runtime INT8 (percentile, final) | 32 | 273.1 | 281.7 | **117.0** | |
+| ONNX Runtime INT8 (minmax) | 1 | 11.3 | 12.7 | 87.2 | |
+| ONNX Runtime INT8 (minmax) | 8 | 70.7 | 74.0 | 112.7 | |
+| ONNX Runtime INT8 (minmax) | 32 | 276.7 | 284.1 | 115.6 | |
+
+\* The INT8 test macro AUC was measured on the cluster, not on this laptop: 0.9694 for percentile on AMD EPYC without VNNI (Δ −0.0073); 0.9754 for minmax on a Xeon with VNNI (Δ −0.0013). Percentile on a VNNI CPU was not measured on the full test set.
+
+- **Speedups (p95, batch 1):** PyTorch FP32 61.7 ms → ONNX FP32 34.4 ms (**1.8×**) → **INT8 12.6 ms (4.9× vs PyTorch, 2.7× vs ONNX FP32)**.
+- **Throughput (batch 32):** 15.9 → 32.0 → **117.0 img/s (7.4× vs PyTorch, 3.7× vs ONNX FP32)**.
+- PyTorch's throughput doesn't improve with batch size on this CPU (17.5 → 15.9 img/s); ONNX Runtime INT8 gains about 34% from batching (87.6 → 117.0).
+- Minmax and percentile INT8 run at the same speed (within about 1–3%).
+- PyTorch FP32 batch 32 has the widest p50→p95 gap (1,960 → 2,424 ms), which may be thermal or background noise; see the per-repeat values in benchmark.json.
+
+### Phase 5b – Agreement with PyTorch FP32 on this laptop (305 sample + edge DICOMs, val thresholds)
+- Sanity check on the serving CPU, not a selection (the samples are test-split + train edge images, enriched for hemorrhages).
+
+| Variant | Mean abs prob diff (range over labels) | Max abs prob diff | Decision flips per label (of 305) |
+|---|---|---|---|
+| ONNX FP32 | 2.2e-8 – 1.0e-7 | 1.9e-6 | **0** for all labels |
+| **INT8 percentile (final)** | 0.0049 – 0.0123 | 0.192 | any 1 · epidural 1 · IPH 5 · IVH 2 · SAH 3 · SDH 6 |
+| INT8 minmax | 0.0053 – 0.0173 | 0.291 | any 6 · epidural 4 · IPH 3 · IVH 5 · SAH 10 · SDH 5 |
+
+- **Percentile agrees with PyTorch better than minmax on this laptop too** (smaller differences and fewer flips: 18 vs 33 in total), consistent with the val-based choice.
+- The sample set is small and hemorrhage-enriched, so these flip rates (0.3–2% per label) aren't comparable to the full-test flip rates.
