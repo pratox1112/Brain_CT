@@ -18,8 +18,8 @@ from typing import Any
 
 import pandas as pd
 
-LABELS = ["any", "epidural", "intraparenchymal", "intraventricular", "subarachnoid", "subdural"]
-SUBTYPES = LABELS[1:]
+from brainct.constants import LABELS, SUBTYPES
+
 HEADER_KEYS = ["image_id", "patient_id", "study_instance_uid", "series_instance_uid"]
 
 

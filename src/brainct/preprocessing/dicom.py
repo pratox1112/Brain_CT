@@ -40,6 +40,7 @@ class PreprocessInfo:
     original_shape: tuple[int, int]
     sign_fixed: bool
     padded: bool
+    modality: str | None = None  # DICOM Modality tag, e.g. "CT" (the API rejects anything else)
 
 
 def read_dicom(data: bytes) -> Dataset:
@@ -78,5 +79,11 @@ def preprocess_dicom(data: bytes, size: int = IMAGE_SIZE) -> tuple[np.ndarray, P
     original_shape = (int(hu.shape[0]), int(hu.shape[1]))
     square = pad_to_square(hu)
     image = np.rint(resize(square, size)).astype(np.int16)
-    info = PreprocessInfo(original_shape, sign_fixed, padded=square.shape != hu.shape)
+    modality = ds.get("Modality")
+    info = PreprocessInfo(
+        original_shape,
+        sign_fixed,
+        padded=square.shape != hu.shape,
+        modality=None if modality is None else str(modality),
+    )
     return image, info
