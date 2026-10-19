@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
+from torch.utils.data import DataLoader
 
 from brainct.data.build_cache import CACHE_FILE
 from brainct.data.labels import LABELS, SUBTYPES
 from brainct.preprocessing.window import model_input
 from brainct.training import bench_loader
+from brainct.training import dataset as dataset_module
 from brainct.training import train as train_module
 from brainct.training.config import TrainConfig, load_config
 from brainct.training.dataset import Augment, CacheDataset, EpochSampler
@@ -109,6 +112,32 @@ def test_direct_and_mmap_reads_are_identical(tiny_cache):
         assert torch.equal(direct[i][0], mmap[i][0])
     with pytest.raises(ValueError, match="read must be"):
         CacheDataset(*args, read="fast")
+
+
+def test_direct_read_reopens_the_file_in_a_new_process(tiny_cache, monkeypatch):
+    # Regression test (2026-10-18): a handle opened in the parent and inherited by forked
+    # DataLoader workers shared one file offset, so concurrent reads returned wrong rows.
+    dataset = CacheDataset(tiny_cache["cache_dir"], tiny_cache["labels_path"], "val", output="hu")
+    expected = dataset[0][0]
+    parent_handle = dataset._file
+
+    child_pid = os.getpid() + 1  # pretend we are now inside a forked worker
+    monkeypatch.setattr(dataset_module.os, "getpid", lambda: child_pid)
+
+    assert torch.equal(dataset[0][0], expected)
+    assert dataset._file is not parent_handle
+    assert dataset._file_pid == child_pid
+
+
+def test_rows_are_correct_with_workers_after_reading_in_the_main_process(tiny_cache):
+    # The real failure mode: read rows in the main process first, then fork workers.
+    dataset = CacheDataset(tiny_cache["cache_dir"], tiny_cache["labels_path"], "val", output="hu")
+    expected = torch.stack([dataset[i][0] for i in range(len(dataset))])  # opens the handle here
+
+    loader = DataLoader(dataset, batch_size=4, shuffle=False, num_workers=2)
+    loaded = torch.cat([x for x, _, _ in loader])
+
+    assert torch.equal(loaded, expected)
 
 
 def test_bench_loader_measures_every_stage(tiny_cache):

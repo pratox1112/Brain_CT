@@ -484,3 +484,27 @@ Pixel format × rescale intercept (image counts):
   - **Epidural** test AUC 0.9715 vs val 0.9588: its intervals are the widest (31 patients per split), so the gap is consistent with noise. Epidural remains the weak class on average precision (0.283) and F1 (0.327).
   - **Weakest by AUC: subdural (0.965) and subarachnoid (0.970).** These are thin or diffuse bleeds that benefit from neighbouring-slice context, which this single-slice model doesn't have (a known limitation).
   - **Resume-line numbers:** macro AUC **0.977** (95% CI 0.973–0.980) across 5 subtypes on a patient-level held-out test set of 76,573 images from 1,894 patients.
+
+---
+
+## Phase 5a – ONNX export and INT8 quantization
+
+### Phase 5a – First run (2026-10-18): export valid, but the val calibration numbers are corrupted (bug found)
+- Run: `sbatch ~/Brain_CT/jobs/optimize.sh` on node d0110, **Intel Xeon Platinum 8276 (has avx512_vnni)**, `short` partition, 32 CPUs (24 ORT threads + 8 loader workers). Elapsed 1,843 s.
+- **Export (valid):** TorchScript exporter, opset 17. Parity with PyTorch FP32 on 512 val images: **max abs logit diff 8.6e-5, mean 3.1e-6.**
+- **File sizes (valid):** ONNX FP32 **93,999,552 B**; ONNX INT8 (entropy) **24,028,028 B** (**−74.4%**, 3.9× smaller).
+- **Test comparison at val thresholds (valid, see below why):**
+
+| Format | Test macro AUC | Δ vs PyTorch FP32 |
+|---|---|---|
+| PyTorch FP32 | 0.97669 | — |
+| ONNX FP32 | 0.97669 | −0.000002 |
+| ONNX INT8 (entropy) | 0.97539 | **−0.00130** |
+
+  - INT8 ΔAUC by label: any −0.0018, epidural −0.0001, intraparenchymal −0.0015, intraventricular −0.0007, subarachnoid −0.0020, subdural −0.0021.
+  - Decision flips vs PyTorch FP32 (out of 76,573): **ONNX FP32: 0–7 per label (≤ 0.009%)**; **ONNX INT8: 69 (epidural, 0.09%) to 603 (any, 0.79%)**.
+- **BUG: the val macro AUC per calibration method is wrong** (minmax 0.746, percentile 0.800, entropy 0.900). The same entropy INT8 model scored **0.975 on test**, which is impossible for a real difference that size.
+  - **Cause:** the pipeline read val images in the main process (parity check, image size), which opened the dataset's file handle there. The DataLoader then **forked** its 8 workers, which **inherited that same open file description and its shared file offset**. Concurrent `seek` + `readinto` from several processes raced, so workers read the wrong rows and the val predictions were partly garbage.
+  - **Test predictions are not affected:** the test dataset was never read in the main process, so each worker opened its own handle.
+  - **Training / evaluate / bench_loader / cache are not affected:** none of them read dataset rows in the main process before starting DataLoader workers.
+  - **Consequence:** the calibration method choice (entropy) was made on corrupted val numbers. It must be redone after the fix.
