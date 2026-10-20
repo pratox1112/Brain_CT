@@ -20,6 +20,7 @@ from prometheus_client import (
     Counter,
     Gauge,
     Histogram,
+    ProcessCollector,
     generate_latest,
 )
 
@@ -37,7 +38,12 @@ from brainct.serving.schemas import (
 from brainct.serving.settings import Settings
 
 ENDPOINTS = {"/predict", "/health", "/ready", "/metrics", "/docs", "/openapi.json"}
-LATENCY_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0)
+# Dense from 10 to 300 ms, where served requests fall, so p95/p99 estimated from the
+# histogram are not off by a whole coarse bucket.
+LATENCY_BUCKETS = (
+    0.005, 0.01, 0.02, 0.025, 0.03, 0.04, 0.05, 0.075,
+    0.1, 0.15, 0.2, 0.25, 0.3, 0.5, 1.0, 2.5, 5.0,
+)  # fmt: skip
 ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     code: {"model": ErrorResponse, "description": text}
     for code, text in {
@@ -54,6 +60,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # A registry per app keeps metrics separate when tests create several apps.
     registry = CollectorRegistry()
+    # process_cpu_seconds_total, process_resident_memory_bytes, ... per pod, read from /proc
+    # (Linux only; on Windows/macOS it reports nothing). Lets Grafana show CPU per pod
+    # without cAdvisor or kube-state-metrics.
+    ProcessCollector(registry=registry)
     requests_total = Counter(
         "brainct_requests", "HTTP requests", ["endpoint", "status"], registry=registry
     )
