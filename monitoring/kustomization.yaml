@@ -1,0 +1,35 @@
+# Phase 9 monitoring: one Prometheus that scrapes only the API pods, and Grafana with the
+# BrainCT dashboard (grafana/brainct.json) loaded from this repo. Same files on the laptop
+# (Docker Desktop) and on GKE. Install the API (Helm) first.
+#
+#   kubectl apply -k monitoring
+#   kubectl -n monitoring rollout status deploy/prometheus deploy/grafana
+#   kubectl -n monitoring port-forward svc/grafana 3000:3000     -> http://127.0.0.1:3000
+#   kubectl delete -k monitoring                                  (remove it all)
+#
+# Data lives in emptyDir volumes: it is lost when the pods go (no disks to pay for or clean up).
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: monitoring
+
+resources:
+  - namespace.yaml
+  - prometheus.yaml
+  - grafana.yaml
+
+# Config files become ConfigMaps. The name gets a content hash, so editing a file and
+# re-applying restarts the pod that uses it.
+configMapGenerator:
+  - name: prometheus-config
+    files:
+      - prometheus/prometheus.yml
+  - name: grafana-datasources
+    files:
+      - grafana/datasources.yaml
+  - name: grafana-dashboard-providers
+    files:
+      - grafana/dashboards.yaml
+  - name: grafana-dashboards
+    files:
+      - grafana/brainct.json

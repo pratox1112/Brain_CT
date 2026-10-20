@@ -679,3 +679,34 @@ Pixel format × rescale intercept (image counts):
   - Much slower than local (23.9 ms) **because each request uploads a ~0.5 MB DICOM from the laptop's home internet connection to us-east1**: upload bandwidth and round-trip time dominate. The server-side `timing` in each response (not captured in this run) separates server time from network time. Phase 9 should measure from a machine close to the cluster.
 - **Teardown:** `helm uninstall brainct`, then `terraform -chdir=infra/terraform destroy` → **"Destroy complete! Resources: 4 destroyed."** Cluster deletion took **5 min 55 s**. The two `google_project_service` entries were removed from state, but the APIs stay enabled (`disable_on_destroy = false`; no cost). `kubectl` was switched back to `docker-desktop`.
 - Session cost: to read from Billing → Reports (charges appear with a delay). **Not yet recorded.**
+
+---
+
+## Phase 9 – Load testing and monitoring
+
+### Phase 9 – Local rehearsal: in-cluster Locust step load (Docker Desktop, free)
+- Date: 2026-10-20
+- Setup: the API as in the Phase 8 local rehearsal (`values-local.yaml`: 2 pods × 2 CPU, `BRAINCT_THREADS=2`, batching off). Load from **inside the cluster**: Kubernetes Job `load_tests/job.yaml` (image `brainct-loadtest:0.1.0`, 1 CPU / 1 GiB, Locust 2.46.7) → the API Service's in-cluster address. Synthetic 512×512 CT DICOMs (`tests/dicom_factory.py`), no RSNA data.
+- Load shape: closed loop (each user sends its next request as soon as the last returns), users 1 → 2 → 4 → 8 → 16 → 32, 120 s per step. Summary: `uv run python scripts/summarize_locust.py load_tests/results/local-k8s-2/run_requests.csv` (first 15 s of each step dropped; exact percentiles over every successful request).
+
+| Users | Window (s) | Requests | req/s | p50 (ms) | p95 (ms) | p99 (ms) | Errors |
+|---|---|---|---|---|---|---|---|
+| 1 **(max sustained)** | 105 | 3116 | 29.6 | 32 | 48 | 68 | 0.00% |
+| 2 | 105 | 2920 | 27.8 | 75 | 99 | 139 | 0.00% |
+| 4 | 105 | 4348 | 41.4 | 91 | 199 | 274 | 0.00% |
+| 8 | 105 | 3803 | 36.2 | 200 | 395 | 502 | 0.00% |
+| 16 | 104 | 3763 | 36.1 | 374 | 806 | 989 | 0.00% |
+| 32 | 105 | 3824 | 36.3 | 891 | 1194 | 1326 | 0.00% |
+
+Degraded = p95 above 2 × 48 ms (the 1-user p95) or errors above 1% (rule fixed before measuring).
+**Max sustained: 29.6 req/s at 1 user (p95 48 ms)**; the 2-user step missed the limit narrowly (p95 99 ms vs 96 ms).
+
+- Observations:
+  - **Saturated by about 4 users:** throughput peaks at 41.4 req/s, then stays near 36 req/s while latency grows with the queue (p50 doubles as users double; at 32 users, 32 in flight ÷ 36.3 req/s ≈ 0.88 s, matching the p50 of 891 ms).
+  - **2 users gave less throughput than 1** (27.8 vs 29.6 req/s) despite 2 pods. Likely cause (not yet confirmed): Kubernetes balances **connections**, not requests, and each Locust user keeps one keep-alive connection, so both can land on the same pod. To be checked with the per-pod request-rate panel (Phase 9 monitoring).
+  - Everything (2 API pods, Locust, Docker Desktop) shares the laptop's CPU, so this is a rehearsal of the method, not the performance result.
+- An earlier full run the same day (before the per-request log existed) gave 27,348 requests, 0 failures, 37.96 req/s averaged over all steps; it has no per-step breakdown.
+- Issues found while setting up (laptop):
+  - `docker run -p 8080:8080` reached nothing: the API listens on **8000** in the container (`-p 8080:8000`). Locust then reported 100% `HTTPConnectionClosed`.
+  - On Windows, `http://localhost:8080` **hangs**: `localhost` resolves to IPv6 `::1` first, and Docker Desktop accepts that connection but never answers. `http://127.0.0.1:8080` works.
+  - `uv sync --group loadtest` removed the `[train]`/`[serve]` extras (uv sync is exact). Use `uv sync --all-extras --group loadtest`.

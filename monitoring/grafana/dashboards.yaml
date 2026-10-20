@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: brainct
+    type: file
+    allowUiUpdates: true   # panels can be edited in the UI; export the JSON back to git to keep changes
+    options:
+      path: /etc/grafana/dashboards
