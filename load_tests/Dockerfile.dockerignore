@@ -1,0 +1,6 @@
+# Used instead of the root .dockerignore when building load_tests/Dockerfile.
+# Send only the load generator's files: never data, samples or weights.
+*
+!load_tests/requirements.txt
+!load_tests/locustfile.py
+!tests/dicom_factory.py

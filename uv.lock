@@ -114,6 +114,9 @@ dev = [
 ]
 loadtest = [
     { name = "locust" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pydicom" },
 ]
 
 [package.metadata]
@@ -145,7 +148,11 @@ dev = [
     { name = "pytest-cov", specifier = ">=5" },
     { name = "ruff", specifier = ">=0.6" },
 ]
-loadtest = [{ name = "locust", specifier = ">=2.29" }]
+loadtest = [
+    { name = "locust", specifier = ">=2.29" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "pydicom", specifier = ">=3.0" },
+]
 
 [[package]]
 name = "brotli"
