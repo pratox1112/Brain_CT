@@ -13,16 +13,21 @@ Run (laptop, against the local API or Kubernetes Service):
 Use 127.0.0.1, not localhost: on Windows, localhost tries IPv6 (::1) first, and Docker
 Desktop accepts that connection but never answers it.
 Quick check:  set BRAINCT_STEP_USERS=1,2 and BRAINCT_STEP_SECONDS=15 first.
+
+With --csv PREFIX, every request is also written to PREFIX_requests.csv (time, latency, users,
+ok) when the test stops; scripts/summarize_locust.py turns it into exact per-step numbers.
 """
 
 from __future__ import annotations
 
+import csv
 import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
-from locust import FastHttpUser, LoadTestShape, constant, task
+from locust import FastHttpUser, LoadTestShape, constant, events, task
 
 # dicom_factory lives in tests/ in the repo; the load-test image copies it next to this file.
 _TESTS = Path(__file__).resolve().parent.parent / "tests"
@@ -59,6 +64,36 @@ def _bodies() -> list[bytes]:
 
 
 BODIES = _bodies()  # built once at startup, so the load generator only sends bytes
+
+# One row per request, kept in memory and written once at the end so logging doesn't add
+# disk writes during the test (a 12-minute run is ~30k rows, about 1 MB).
+REQUEST_LOG: list[tuple[float, float, int, int]] = []
+_STATE: dict = {"env": None}
+
+
+@events.init.add_listener
+def _keep_environment(environment, **_kwargs) -> None:
+    _STATE["env"] = environment
+
+
+@events.request.add_listener
+def _log_request(response_time: float, exception: BaseException | None, **_kwargs) -> None:
+    # users = the step this request finished in; ok = 0 for any failure (incl. non-2xx).
+    runner = _STATE["env"].runner if _STATE["env"] is not None else None
+    users = runner.user_count if runner is not None else 0
+    ok = int(exception is None)
+    REQUEST_LOG.append((round(time.time(), 3), round(response_time, 2), users, ok))
+
+
+@events.test_stop.add_listener
+def _write_request_log(environment, **_kwargs) -> None:
+    prefix = getattr(environment.parsed_options, "csv_prefix", None)
+    if not prefix:
+        return
+    with open(f"{prefix}_requests.csv", "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["time_s", "latency_ms", "users", "ok"])
+        writer.writerows(REQUEST_LOG)
 
 
 class PredictUser(FastHttpUser):
