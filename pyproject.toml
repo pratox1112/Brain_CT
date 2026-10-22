@@ -69,8 +69,8 @@ packages = ["src/brainct"]
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
-# Legacy research notebooks are kept for reference only and are not linted.
-extend-exclude = ["classification", "segmentation", "3d segmentation"]
+# Legacy research notebooks (legacy/) are kept for reference only and are not linted.
+extend-exclude = ["legacy"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
