@@ -710,3 +710,48 @@ Degraded = p95 above 2 × 48 ms (the 1-user p95) or errors above 1% (rule fixed 
   - `docker run -p 8080:8080` reached nothing: the API listens on **8000** in the container (`-p 8080:8000`). Locust then reported 100% `HTTPConnectionClosed`.
   - On Windows, `http://localhost:8080` **hangs**: `localhost` resolves to IPv6 `::1` first, and Docker Desktop accepts that connection but never answers. `http://127.0.0.1:8080` works.
   - `uv sync --group loadtest` removed the `[train]`/`[serve]` extras (uv sync is exact). Use `uv sync --all-extras --group loadtest`.
+
+### Phase 9 – GKE Autopilot load tests (session 3, 2026-10-21/22)
+- Setup: GKE Autopilot, us-east1. API pods 2 vCPU / 2 GiB (request = limit), `BRAINCT_THREADS=2`, INT8 model, **Service type ClusterIP (no public IP)**. Load from **inside the cluster**: Job `load_tests/job.yaml` (Locust 2.46.7, 1 CPU / 1 GiB) → the API Service. Same step load and summary method as the local rehearsal (1 → 32 users, 120 s per step, first 15 s of each step dropped, exact percentiles over successful requests). Prometheus (5 s scrape) + Grafana from `monitoring/` (`kubectl apply -k monitoring`).
+- **The Terraform IAM fix worked:** fresh `apply` (6 resources), and the API pod pulled its image from Artifact Registry with no 403.
+- Earlier attempts not used for results: session 2's Run A was copied before Locust finished (no request log; no 32-user step). Session 3's first Job ran on the **laptop's** cluster by mistake (kubectl context `docker-desktop`, no `brainct` Service → 100% `gaierror`); fixed by checking the context before every apply.
+
+#### Run A – HPA on (1–4 pods, 70% CPU target), batching off
+`summarize_locust.py load_tests/results/gke-A2/run_requests.csv` (15,730 requests logged):
+
+| Users | Window (s) | Requests | req/s | p50 (ms) | p95 (ms) | p99 (ms) | Errors |
+|---|---|---|---|---|---|---|---|
+| 1 | 105 | 1225 | 11.7 | 79 | 122 | 172 | 0.00% |
+| 2 | 105 | 1397 | 13.3 | 145 | 197 | 214 | 0.00% |
+| 4 **(max sustained)** | 105 | 2540 | 24.2 | 161 | 207 | 235 | 0.00% |
+| 8 | 104 | 2467 | 23.6 | 374 | 502 | 545 | 0.00% |
+| 16 | 105 | 3207 | 30.4 | 405 | 1006 | 1129 | 0.00% |
+| 32 | 105 | 3001 | 28.7 | 1046 | 1693 | 1919 | 0.00% |
+
+Degraded = p95 above 2 × 122 ms (the 1-user p95) or errors above 1%.
+**Max sustained: 24.2 req/s at 4 users (p95 207 ms), 0 errors at every step.**
+
+- **Scaling (read from the Grafana screenshot `docs/grafana_gke_runA.jpeg`):** the HPA scaled **1 → 2 → 3 pods** during the run; **it did not reach 4**. The second pod started serving about 3–4 min into the test, the third about 2–3 min after that. Exact HPA event times and the Locust pod's CPU (`kubectl top pod`) were not recorded.
+- **Per-pod request rate (same screenshot):** once several pods were up, each served roughly 10 req/s and the total reached about 30 req/s, so the load **was spread across the pods** at higher user counts.
+- Throughput rose with pods (11.7 → 30.4 req/s, about 2.6×) but latency still grew with the queue, because new pods arrived minutes after each step began (scale-out lag of the HPA plus Autopilot node provisioning).
+
+#### Runs B and C – 1 pod fixed (HPA off), batching off vs on
+`summarize_locust.py load_tests/results/gke-B/run_requests.csv` (7,838 requests) and `.../gke-C/run_requests.csv` (9,894 requests); both 0 errors at every step.
+
+| Users | B: off req/s | B: off p50 / p95 (ms) | C: on req/s | C: on p50 / p95 (ms) |
+|---|---|---|---|---|
+| 1 | **13.3** | 73 / 89 | 12.2 | 80 / 96 |
+| 2 | 13.2 | 146 / 196 | **13.3** | 147 / 175 |
+| 4 | 10.3 | 397 / 448 | 13.8 | 284 / 329 |
+| 8 | 9.5 | 811 / 1140 | 14.0 | 562 / 666 |
+| 16 | 9.5 | 1662 / 2342 | 14.6 | 1125 / 1446 |
+| 32 | 9.5 | 3348 / 4528 | **14.7** | 2177 / 2522 |
+
+Max sustained (same rule): **B 13.3 req/s at 1 user (p95 89 ms); C 13.3 req/s at 2 users (p95 175 ms).**
+
+- **One 2-vCPU GKE pod sustains about 13 req/s.** That is less than half the laptop rehearsal's single-user rate (29.6 req/s, Phase 9 local), so a GKE vCPU here is slower than a laptop core for this model.
+- **Batching off: throughput falls under overload** (13.3 → 9.5 req/s from 4 users up). Likely cause, not verified: concurrent requests' preprocessing threads compete with ONNX Runtime's 2 inference threads for the pod's 2 vCPUs.
+- **Batching on: no gain at low load** (1 user: 12.2 vs 13.3 req/s, p50 +7 ms), **but under overload it keeps throughput up**: at 32 users 14.7 vs 9.5 req/s (**+55%**) and p95 2.5 s vs 4.5 s. Phase 6 on the laptop found no gain; the difference is the small CPU budget per pod.
+- Teardown: `terraform destroy`; kubectl back on `docker-desktop`. (Checks of state, clusters, registry, VMs, disks and forwarding rules: to confirm.)
+- Session costs (sessions 1–3): to read from Billing → Reports. **Not yet recorded.**
+- **Decision (owner, 2026-10-22): micro-batching ON for GKE** (`BRAINCT_BATCHING: "true"` in `infra/helm/values-gke.yaml`), based on Runs B/C above. The chart, Dockerfile and laptop defaults stay off (Phase 6: no gain on the laptop).
