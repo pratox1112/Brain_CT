@@ -13,7 +13,7 @@
   <img alt="GitHub Actions" src="https://img.shields.io/badge/GitHub_Actions-2088FF?style=for-the-badge&logo=githubactions&logoColor=white">
   <img alt="pytest" src="https://img.shields.io/badge/pytest-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white">
   <br>
-  <img alt="Google Cloud" src="https://img.shields.io/badge/GKE_Autopilot-4285F4?style=for-the-badge&logo=googlecloud&logoColor=white">
+  <img alt="Google Cloud (GKE Autopilot)" src="https://img.shields.io/badge/Google_Cloud_·_GKE_Autopilot-4285F4?style=for-the-badge&logo=googlecloud&logoColor=white">
   <img alt="Kubernetes" src="https://img.shields.io/badge/Kubernetes-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white">
   <img alt="Helm" src="https://img.shields.io/badge/Helm-0F1689?style=for-the-badge&logo=helm&logoColor=white">
   <img alt="Terraform" src="https://img.shields.io/badge/Terraform-844FBA?style=for-the-badge&logo=terraform&logoColor=white">
