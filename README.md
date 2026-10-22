@@ -1,159 +1,194 @@
-# Brain CT Image Hemorrhage Classification & Segmentation
+# BrainCT: intracranial hemorrhage detection, from DICOM to autoscaled API
 
-**Date:** April 20, 2025
-**Authors:** Pratosh Karthikeyan and Nirmal
+[![CI](https://github.com/pratox1112/BrainCT-Hemorrhage-MLOps/actions/workflows/ci.yml/badge.svg)](https://github.com/pratox1112/BrainCT-Hemorrhage-MLOps/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-## Abstract
+> **Research use only. Not a medical device and not for clinical decisions.**
 
-This project constructed classification and segmentation models for brain CT images based on CNN (Convolutional Neural Network) and U-Net architecture. Six classes are involved based on different categories of hemorrhage in patient's brain, whereas the segmentation aims to provide the exact location of the hemorrhage for a given brain CT image.
+An end-to-end ML system for detecting five types of brain hemorrhage on CT slices: a
+reproducible data pipeline over 752,803 RSNA DICOMs, a ResNet-50 trained on a GPU cluster,
+ONNX export and INT8 quantization, a FastAPI service in a PyTorch-free Docker image, a CI
+suite with regression tests, and deployment to **GKE Autopilot** with Terraform, Helm, a
+Horizontal Pod Autoscaler, Prometheus and Grafana, load-tested from inside the cluster.
 
-### Methodology
-- Cropped 3D data of brain CT scan to fit ventricular region compactly
-- Used 3D U-net as semantic segmentation with weighted binary crossentropy loss
+Every number below comes from [`docs/results.md`](docs/results.md), which records how and
+where each one was measured.
 
-### Results
-- **Classification Accuracy:** 68% (testing set)
-- **Segmentation Accuracy:** 92% (testing set)
+## Highlights
 
-## Clinical Importance
+| | Result |
+|---|---|
+| **Model quality** | Test macro ROC AUC **0.977** (95% CI 0.973–0.980) over 5 subtypes, on a held-out, **patient-level** test set of 76,573 images from 1,894 patients |
+| **Model size** | INT8 ONNX model **24.0 MB**, 3.9× smaller than FP32 (94.0 MB) |
+| **Model latency** (laptop CPU, batch 1) | p95 **12.6 ms** INT8 vs 61.7 ms PyTorch FP32 (**4.9× faster**); throughput 117 vs 15.9 img/s at batch 32 |
+| **API latency** (laptop, Docker, 1 client) | p50 **23.9 ms**, p95 **38.6 ms** end to end (upload, DICOM decode, preprocessing, inference) |
+| **GKE, autoscaled** | Max sustained **24.2 req/s at p95 207 ms**, 0 errors; HPA scaled **1 → 3 pods** under a step load of 1 → 32 concurrent users |
+| **GKE, micro-batching** | Under overload on one 2-vCPU pod: **14.7 vs 9.5 req/s (+55%)**, p95 2.5 s vs 4.5 s |
+| **Tests** | 420 tests, **86%** coverage of `src/brainct`; regression tests catch a 1-HU change in one window |
 
-Brain surgery requires doctors to precisely locate the treatment part, since a tiny error may cause serious results. Mathematical models can make better judgments for treatment.
+## Architecture
 
-### Tasks Addressed
-1. Decide if there is hemorrhage in patient's brain
-2. Determine which types of hemorrhage exist  
-3. Locate exact position of hemorrhage
+```mermaid
+flowchart LR
+    subgraph Cluster["GPU cluster (Slurm)"]
+        Z[RSNA DICOM zip<br/>752,803 images] --> H[Header scan<br/>patient-level split]
+        Z --> P[Preprocessing<br/>HU, 12-bit sign fix,<br/>pad + resize 256]
+        P --> C[(HU cache<br/>int16 memmap, 92 GiB)]
+        C --> T[ResNet-50 training<br/>bf16 AMP, W&B]
+        T --> E[Evaluation<br/>patient bootstrap CIs]
+        T --> O[ONNX export<br/>+ static INT8]
+    end
+    subgraph Build["Laptop + GitHub Actions"]
+        O --> D[FastAPI image<br/>ONNX Runtime, no PyTorch]
+        D --> CI[CI: lint, tests,<br/>regression, image smoke test]
+    end
+    subgraph GKE["GKE Autopilot (Terraform + Helm)"]
+        D --> AR[(Artifact Registry)]
+        AR --> API[API pods<br/>HPA 1-4 on CPU]
+        L[Locust Job<br/>in-cluster step load] --> API
+        API --> PR[Prometheus] --> G[Grafana dashboard]
+    end
+```
 
-## Dataset
+The same `preprocess_dicom` function builds the training cache and serves requests, so
+training and serving can't drift apart; a test checks that served predictions equal an
+offline ONNX run of the same file.
 
-### Source
-**Provider:** Zeta Surgical
+## Results
 
-**Company Mission:** Democratize access to accurate, safe, and fast image guidance, to unlock the use of image guidance directly at the point of care, and to enable new treatments in cases such as emergencies and bedside procedures.
+### Model: test set, evaluated once
 
-### Specifications
-- **Total Instances:** 752,803
-- **Image Size:** 512 × 512 pixels
-- **Channels:** 3 (RGB)
+ResNet-50 (ImageNet weights), 3-window input (brain 40/80, subdural 80/200, bone 600/2800) at
+256 px, 5 epochs, trained in 45 minutes on one A100. Thresholds were chosen on val and
+applied unchanged to test; confidence intervals from 1,000 patient-level bootstrap resamples.
 
-### Categories
-| Category | Instances |
-|----------|-----------|
-| Epidural | 1,694 |
-| Intraparenchymal | 15,664 |
-| Intraventricular | 9,878 |
-| Subarachnoid | 16,423 |
-| Subdural | 32,200 |
-| Multiple Hemorrhage | 32,074 |
+| Label | ROC AUC | 95% CI | Average precision | F1 (val threshold) |
+|---|---|---|---|---|
+| any | 0.9773 | 0.9741–0.9805 | 0.911 | 0.839 |
+| epidural | 0.9715 | 0.9537–0.9838 | 0.283 | 0.327 |
+| intraparenchymal | 0.9845 | 0.9818–0.9870 | 0.866 | 0.797 |
+| intraventricular | 0.9926 | 0.9906–0.9942 | 0.897 | 0.831 |
+| subarachnoid | 0.9701 | 0.9646–0.9748 | 0.746 | 0.677 |
+| subdural | 0.9648 | 0.9576–0.9711 | 0.753 | 0.695 |
+| **macro (5 subtypes)** | **0.9767** | **0.9727–0.9801** | **0.709** | **0.665** |
 
-### Preprocessing Steps
-1. **Convert RGB to Grayscale:** Using formula `Xij = (Rij + Gij + Bij) / 3`
-2. **Resize Images:** From 512×512 to 128×128 pixels
-3. **Dataset Selection:** Random selection of 1,000 images per category for training
+### Optimization: PyTorch vs ONNX Runtime (laptop, Intel Core Ultra 7 155U, 8 threads)
 
-## Models
+| Version | p95 batch 1 (ms) | Throughput batch 32 (img/s) | Size | Test macro AUC |
+|---|---|---|---|---|
+| PyTorch FP32 | 61.7 | 15.9 | – | 0.9767 |
+| ONNX Runtime FP32 | 34.4 | 32.0 | 94.0 MB | 0.9767 |
+| **ONNX Runtime INT8** | **12.6** | **117.0** | **24.0 MB** | 0.9694–0.9754* |
 
-## Classification Model
+\* INT8 accuracy depends on the CPU: −0.0013 macro AUC on a Xeon with VNNI instructions,
+−0.0073 on an AMD EPYC without them (a known ONNX Runtime u8s8 behaviour). Both measured on
+the full test set on the cluster. See `docs/results.md`, Phase 5a.
 
-### Architecture: CNN
-- **Layers:** 
-  - 3 convolution layers with ReLU and Max Pooling
-  - 1 convolution layer with flattening layer
-  - 2 fully-connected hidden layers
-- **Parameters:** 1.2 million
+### Load tests on GKE Autopilot (from inside the cluster)
 
-### Dataset Split
-- **Training Instances:** 4,800 (80%)
-- **Testing Instances:** 1,200 (20%)
+Locust runs as a Kubernetes Job next to the API, so the numbers measure the service and not a
+home internet upload. Step load: 1 → 2 → 4 → 8 → 16 → 32 concurrent users, 2 minutes each.
+"Max sustained" = the highest step with p95 at most 2× its 1-user value and under 1% errors
+(rule fixed before measuring). Each pod: 2 vCPU, 2 GiB.
 
-### Challenges
-- Significant overfitting (90% training vs 50% validation accuracy)
-- Unstable results due to random initialization dependency
+| Setup | Max sustained | Peak throughput | Errors |
+|---|---|---|---|
+| HPA 1–4 pods, batching off | **24.2 req/s** at 4 users (p95 207 ms) | 30.4 req/s (16 users, 3 pods) | 0% |
+| 1 pod, batching off | 13.3 req/s at 1 user (p95 89 ms) | 13.3 req/s, falling to 9.5 under overload | 0% |
+| 1 pod, batching on | 13.3 req/s at 2 users (p95 175 ms) | **14.7 req/s** at 32 users | 0% |
 
-### Solutions Attempted
-- Added Dropout layers
-- Increased dataset to 1,600 images per type
-- Tuned learning rate and architecture size
-- Changed dropout parameters
+![Grafana dashboard during the autoscaled GKE run](docs/grafana_gke_runA.jpeg)
 
-### Results
-- **Final Testing Accuracy:** 68%
-- **Final Training Accuracy:** 75%
-- **Optimal Epochs:** 25
-- **Maximum Validation Accuracy:** 70%
+Pods went from 1 to 3 during the run, and requests spread across them. Micro-batching is
+therefore **on for GKE** (`infra/helm/values-gke.yaml`) and off by default elsewhere: on the
+laptop it gave no gain.
 
-## Segmentation Model
+## Repository layout
 
-### Architecture: 3D U-Net
+```
+src/brainct/
+  data/            zip reader, header scan, labels, patient split, HU cache build + check
+  preprocessing/   DICOM -> HU (with the 12-bit sign fix), windows, model input
+  training/        dataset, ResNet-50, train loop (bf16, resume), evaluation, metrics
+  optimization/    ONNX export, INT8 quantization, ONNX evaluation, latency benchmark
+  serving/         FastAPI app, micro-batcher, settings, async load-test client
+tests/             unit, API and regression tests (synthetic DICOMs; no data needed in CI)
+jobs/              Slurm scripts for the cluster steps
+serving/           API Dockerfile + exported requirements
+infra/terraform/   GKE Autopilot cluster, Artifact Registry, node IAM
+infra/helm/        API chart + values for Docker Desktop and GKE
+monitoring/        Prometheus + Grafana (Kustomize), dashboard as code
+load_tests/        Locust step load, its image and the in-cluster Job
+scripts/           CI stand-in assets, regression expectations, load-test summary
+docs/              results.md (every measured number), decisions.md
+legacy/            the original 2025 research notebooks (reference only)
+```
 
-### Dataset
-- **Source:** Reference [4] - 3D MRI images
-- **Total Images:** 87
-- **Original Dimensions:** (176, 208, 176)
-- **Cropped Dimensions:** (80, 120, 120)
-- **Focus Area:** Ventricular region
+## How to run it
 
-### Architecture Details
-- **Input Size:** 512 × 512
-- **Structure:**
-  - Contraction path (gray) - usual CNN process
-  - Expansion path (black) - upsampling back to original size
-- **Layers:**
-  - Conv3D layers with 3×3×3 filters
-  - 3D max-pooling with 2×2×2 cube
-  - Concatenation of contracting and expanding paths
+Python 3.11 and [uv](https://docs.astral.sh/uv/). The data and weights are not in this
+repository (see [Data and licence](#data-and-licence)).
 
-### Training Configuration
-- **Parameters:** 1.2 million
-- **Optimizer:** Adam
-- **Learning Rate:** 2e-4
-- **Loss Function:** Weighted binary crossentropy
-- **Loss Weights:** [0.2, 0.8] (background, mask)
-- **Metrics:** Accuracy
+**Set up and test (laptop)**
+```bash
+uv sync --all-extras --group loadtest
+uv run ruff check . && uv run pytest
+```
 
-### Results
-- **Testing Accuracy:** 92%
-- **Training Accuracy:** 98%
+**Data, cache and training (GPU cluster, Slurm)**: download with the Kaggle API, then
+```bash
+sbatch jobs/extract_headers.sh      # header scan -> image/patient table
+sbatch jobs/make_split.sh           # patient-level 80/10/10 split, seed 2026
+sbatch jobs/build_cache.sh          # DICOM -> HU int16 cache [N, 256, 256]
+sbatch jobs/check_cache.sh          # cache equals fresh preprocessing
+bash   jobs/train_chain.sh 2 --set run_id=resnet50_baseline   # chained, resumable jobs
+sbatch jobs/evaluate.sh resnet50_baseline val                 # then: ... test (once)
+sbatch jobs/optimize.sh             # ONNX export, INT8 calibration, accuracy check
+```
 
-## Performance Analysis
+**Benchmark and serve (laptop)**, with the model files in `artifacts/resnet50_baseline/`:
+```bash
+uv run python -m brainct.optimization.benchmark
+docker build -f serving/Dockerfile -t brainct-api:0.1.0 .
+docker run --rm -p 8080:8000 brainct-api:0.1.0      # http://127.0.0.1:8080/docs
+```
 
-### Classification
-**Challenges:**
-- Much more difficult task compared to segmentation
-- Required extensive trial and error
-- Low and unstable accuracy results
+**Deploy to GKE and load-test** (costs money while it runs; always tear down)
+```bash
+terraform -chdir=infra/terraform apply
+# push the API and load-test images to the registry from `terraform output`, then:
+helm install brainct infra/helm/brainct -f infra/helm/values-gke.yaml \
+    --set image.repository=<registry>/brainct-api --set service.type=ClusterIP
+kubectl apply -k monitoring
+kubectl apply -f load_tests/job.yaml        # with the image set to the registry path
+uv run python scripts/summarize_locust.py load_tests/results/<run>/run_requests.csv
+helm uninstall brainct && kubectl delete -k monitoring
+terraform -chdir=infra/terraform destroy
+```
 
-### Segmentation
-**Advantages:**
-- More stable training process
-- Good accuracy achieved
+## Known limitations
 
-**Limitations:**
-- Not good F1 score due to high class imbalance
+- **Single-slice input.** Each slice is classified on its own, without neighbouring slices.
+  Top RSNA solutions use slice context; it would most help the weakest subtypes here,
+  **subdural (AUC 0.965) and subarachnoid (0.970)**, which are thin or diffuse bleeds.
+- **Epidural is rare** (0.45% of images, 31 test patients): high AUC (0.972) but low average
+  precision (0.283) and F1 (0.327), so many false alarms per true detection, and the widest
+  confidence interval.
+- **One data source.** All images come from the RSNA 2019 dataset; no external validation.
+- **Not comparable to the Kaggle leaderboard:** a different, patient-level split and metric.
+- **CPU-only serving**, and INT8 accuracy depends on the CPU's instruction set (see above).
+- **Load generator:** one Locust process with 1 CPU. Its CPU use during the GKE runs was not
+  recorded, so whether it limited the highest steps is not known.
+- **No drift monitoring** yet (e.g. input-intensity and prediction distributions against a
+  training reference); a natural next step.
 
-## Future Work
+## Data and licence
 
-### Proposed Improvements
-- Use different weights for weighted binary crossentropy loss
-- Analyze effect on confusion matrix
-- Perform data augmentation to increase dataset size
-- Fine-tune hyperparameters
-- Use bigger architecture (current: 1.4M parameters)
+- Data: [RSNA Intracranial Hemorrhage Detection](https://www.kaggle.com/competitions/rsna-intracranial-hemorrhage-detection)
+  (Kaggle, 2019). Its competition rules apply; **no images, cache files or trained weights
+  are distributed with the current code**. CI uses synthetic DICOMs and a stand-in model.
+- Code: [MIT](LICENSE). The licence covers the source code only.
+- The original 2025 research notebooks (Pratosh Karthikeyan and Nirmal) are in
+  [`legacy/`](legacy/README.md); their numbers are not comparable to the results above.
 
-## Acknowledgments
-
-We hereby especially thank **Professor He Wang** for providing the opportunity for us to work on this project and to visit the company. We are also grateful for **Zeta Surgical**, for giving us such an opportunity to work on live industrial project by generously offering us its first-hand dataset.
-
-**Special Thanks:**
-- **Raahil Sha** (Co-Founder and CTO at Zeta Surgical) and his team
-- Zeta Surgical team for providing first-hand dataset
-- Company visit opportunity and access to high-power computers
-
-## References
-
-1. Intracerebral Haemorrhage Segmentation in Non-Contrast CT
-2. Automatic Segmentation of Intracerebral Hemorrhage from Brain CT Images  
-3. Segmentation and quantification of intra-ventricular/cerebral hemorrhage in CT scans
-4. Segmentation part from MATH7243-2020 course
-5. Performance evaluation of 2D and 3D segmentation approaches on CT images
-6. MRI-Image-Segmentation
+Design choices and the alternatives considered are in [`docs/decisions.md`](docs/decisions.md).
