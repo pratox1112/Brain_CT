@@ -20,6 +20,12 @@ resources:
     cpu: "2"
     memory: 2Gi
 
+# Micro-batching on for GKE only: on a 2-vCPU pod it kept 14.7 vs 9.5 req/s under overload
+# (+55%, results.md Phase 9), at ~7 ms extra p50 at low load. Laptop/Docker defaults stay off.
+# Helm merges this into the chart's env map, so the other settings keep their defaults.
+env:
+  BRAINCT_BATCHING: "true"
+
 # A public IP from Google's load balancer, on port 80.
 service:
   type: LoadBalancer

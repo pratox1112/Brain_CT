@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 
 import numpy as np
 import pydicom
@@ -165,6 +166,23 @@ def test_metrics_count_requests(client, dicom_bytes):
     assert 'brainct_requests_total{endpoint="/predict",status="400"} 1.0' in text
     assert "brainct_stage_seconds_count" in text
     assert "brainct_model_loaded 1.0" in text
+
+
+def test_metrics_latency_buckets_resolve_tens_of_ms(client):
+    client.get("/health")
+
+    text = client.get("/metrics").text
+
+    for le in ("0.02", "0.03", "0.04", "0.075", "0.15", "0.2", "0.3"):
+        assert f'brainct_request_latency_seconds_bucket{{endpoint="/health",le="{le}"}}' in text
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/stat"), reason="needs Linux /proc")
+def test_metrics_include_process_cpu_and_memory(client):
+    text = client.get("/metrics").text
+
+    assert "process_cpu_seconds_total" in text
+    assert "process_resident_memory_bytes" in text
 
 
 def test_settings_from_environment(monkeypatch, tmp_path):

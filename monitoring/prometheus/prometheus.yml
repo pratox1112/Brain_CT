@@ -1,0 +1,28 @@
+# Scrape only pods that opt in with the prometheus.io/* annotations (the BrainCT API's Helm
+# chart sets them). Every 5 s, so a 2-minute load step has ~24 points per pod.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: brainct
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [default]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        regex: "true"
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_phase]
+        regex: Running
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        regex: (.+);(.+)
+        replacement: $1:$2
+        target_label: __address__
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        regex: (.+)
+        target_label: __metrics_path__
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod

@@ -23,6 +23,12 @@ resources:
     cpu: "2"
     memory: 2Gi
 
+# Lets the Phase 9 Prometheus (monitoring/) find and scrape every API pod.
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8000"
+  prometheus.io/path: /metrics
+
 env:
   BRAINCT_THREADS: "2"
   BRAINCT_BATCHING: "false"  # measured: no gain on one machine (results.md, Phase 6)

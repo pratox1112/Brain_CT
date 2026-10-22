@@ -1,0 +1,76 @@
+# Step load test from inside the cluster, so results measure the API and not a home upload.
+# Install the API (Helm) first: Kubernetes then gives this pod BRAINCT_SERVICE_HOST/_PORT,
+# the API Service's in-cluster address, on the laptop (port 8080) and on GKE (port 80) alike.
+#
+#   kubectl apply -f load_tests/job.yaml          (laptop: the image is found locally)
+#   kubectl logs -f job/brainct-loadtest          (summary at the end, after ~12 min)
+#   copy the CSVs (the pod waits 20 min for this), then:  kubectl delete -f load_tests/job.yaml
+#
+# On GKE, swap the image name for its Artifact Registry path when applying (same file).
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: brainct-loadtest
+  labels:
+    app.kubernetes.io/name: brainct-loadtest
+spec:
+  backoffLimit: 0                # a failed load test is looked at, not retried
+  activeDeadlineSeconds: 2400    # 12 min test + 20 min to copy results + margin
+  ttlSecondsAfterFinished: 600   # clean up 10 min after it ends
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: brainct-loadtest
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: locust
+          image: brainct-loadtest:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              locust -f /app/locustfile.py --headless --only-summary \
+                --host "http://${BRAINCT_SERVICE_HOST}:${BRAINCT_SERVICE_PORT}" \
+                --csv /results/run --csv-full-history
+              status=$?
+              echo "locust exit code ${status}; CSVs in /results, copy them within 20 min"
+              sleep 1200
+              exit ${status}
+          env:
+            - name: BRAINCT_STEP_USERS
+              value: "1,2,4,8,16,32"
+            - name: BRAINCT_STEP_SECONDS
+              value: "120"
+          # One Locust process uses at most one core. Autopilot needs limits = requests.
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: results
+              mountPath: /results
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: results
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

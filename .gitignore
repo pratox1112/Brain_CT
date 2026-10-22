@@ -29,3 +29,6 @@ __pycache__/
 *.tfplan
 crash.log
 infra/terraform/terraform.tfvars
+
+# Load-test output (CSV from Locust); the numbers that matter go in docs/results.md
+/load_tests/results/

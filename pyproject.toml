@@ -39,6 +39,13 @@ dev = [
     "pytest-cov>=5",
     "ruff>=0.6",
 ]
+# Phase 9 load generator; kept out of dev so CI and the API image don't install it.
+# numpy + pydicom are listed again so the load-test image can install this group alone.
+loadtest = [
+    "locust>=2.29",
+    "numpy>=1.26",
+    "pydicom>=3.0",
+]
 
 # Laptop and CI use CPU builds of PyTorch (small, no GPU). The cluster keeps its own CUDA 12.6
 # build, installed once by hand; `uv pip install -e ".[train]"` there leaves it in place.
