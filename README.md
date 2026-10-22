@@ -1,7 +1,27 @@
-# BrainCT: intracranial hemorrhage detection, from DICOM to autoscaled API
+# BrainCT: Intracranial Hemorrhage detection, from DICOM to autoscaled API
 
 [![CI](https://github.com/pratox1112/BrainCT-Hemorrhage-MLOps/actions/workflows/ci.yml/badge.svg)](https://github.com/pratox1112/BrainCT-Hemorrhage-MLOps/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+<p>
+  <img alt="Python" src="https://img.shields.io/badge/Python_3.11-3776AB?style=for-the-badge&logo=python&logoColor=white">
+  <img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white">
+  <img alt="Weights & Biases" src="https://img.shields.io/badge/Weights_%26_Biases-FFBE00?style=for-the-badge&logo=weightsandbiases&logoColor=black">
+  <img alt="ONNX Runtime" src="https://img.shields.io/badge/ONNX_Runtime-005CED?style=for-the-badge&logo=onnx&logoColor=white">
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white">
+  <img alt="Docker" src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white">
+  <img alt="GitHub Actions" src="https://img.shields.io/badge/GitHub_Actions-2088FF?style=for-the-badge&logo=githubactions&logoColor=white">
+  <img alt="pytest" src="https://img.shields.io/badge/pytest-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white">
+  <br>
+  <img alt="Google Cloud" src="https://img.shields.io/badge/GKE_Autopilot-4285F4?style=for-the-badge&logo=googlecloud&logoColor=white">
+  <img alt="Kubernetes" src="https://img.shields.io/badge/Kubernetes-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white">
+  <img alt="Helm" src="https://img.shields.io/badge/Helm-0F1689?style=for-the-badge&logo=helm&logoColor=white">
+  <img alt="Terraform" src="https://img.shields.io/badge/Terraform-844FBA?style=for-the-badge&logo=terraform&logoColor=white">
+  <img alt="Prometheus" src="https://img.shields.io/badge/Prometheus-E6522C?style=for-the-badge&logo=prometheus&logoColor=white">
+  <img alt="Grafana" src="https://img.shields.io/badge/Grafana-F46800?style=for-the-badge&logo=grafana&logoColor=white">
+  <img alt="Locust" src="https://img.shields.io/badge/Locust-1A7F37?style=for-the-badge&logoColor=white">
+  <img alt="Slurm" src="https://img.shields.io/badge/Slurm_(A100)-76B900?style=for-the-badge&logo=nvidia&logoColor=white">
+</p>
 
 > **Research use only. Not a medical device and not for clinical decisions.**
 
